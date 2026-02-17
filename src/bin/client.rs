@@ -140,7 +140,10 @@ async fn main() {
     }
     if let Some(h) = console_handle {
         let mut h = h;
-        if tokio::time::timeout(Duration::from_secs(2), &mut h).await.is_err() {
+        if tokio::time::timeout(Duration::from_secs(2), &mut h)
+            .await
+            .is_err()
+        {
             h.abort();
             let _ = h.await;
         }

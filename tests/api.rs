@@ -2,8 +2,8 @@ use resource_monitor::api::{router, AppState};
 use resource_monitor::metrics::{CpuMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics};
 use resource_monitor::storage::MetricsBuffer;
 use std::sync::Arc;
-use tower::util::ServiceExt;
 use tokio_util::sync::CancellationToken;
+use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn history_initially_empty() {

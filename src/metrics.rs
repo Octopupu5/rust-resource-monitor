@@ -48,5 +48,3 @@ pub fn now_timestamp_ms() -> u128 {
         }
     }
 }
-
-
