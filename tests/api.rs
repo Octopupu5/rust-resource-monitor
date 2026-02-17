@@ -3,12 +3,17 @@ use resource_monitor::metrics::{CpuMetrics, MemoryMetrics, MetricsSnapshot, Netw
 use resource_monitor::storage::MetricsBuffer;
 use std::sync::Arc;
 use tower::util::ServiceExt;
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn history_initially_empty() {
     let buffer = Arc::new(MetricsBuffer::new(10));
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
-    let app = router(AppState { buffer, stream_tx });
+    let app = router(AppState {
+        buffer,
+        stream_tx,
+        shutdown: CancellationToken::new(),
+    });
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -31,7 +36,11 @@ async fn history_initially_empty() {
 async fn health_ok() {
     let buffer = Arc::new(MetricsBuffer::new(10));
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
-    let app = router(AppState { buffer, stream_tx });
+    let app = router(AppState {
+        buffer,
+        stream_tx,
+        shutdown: CancellationToken::new(),
+    });
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -51,7 +60,11 @@ async fn history_filters_by_since_ms() {
     buffer.push(sample_snapshot(2000));
 
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
-    let app = router(AppState { buffer, stream_tx });
+    let app = router(AppState {
+        buffer,
+        stream_tx,
+        shutdown: CancellationToken::new(),
+    });
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -75,7 +88,11 @@ async fn history_filters_by_since_ms() {
 async fn stream_is_event_stream() {
     let buffer = Arc::new(MetricsBuffer::new(10));
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
-    let app = router(AppState { buffer, stream_tx });
+    let app = router(AppState {
+        buffer,
+        stream_tx,
+        shutdown: CancellationToken::new(),
+    });
     let response = app
         .oneshot(
             axum::http::Request::builder()

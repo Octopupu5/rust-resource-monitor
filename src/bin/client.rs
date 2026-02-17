@@ -5,6 +5,7 @@ use resource_monitor::runtime;
 use resource_monitor::storage::MetricsBuffer;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
@@ -92,6 +93,7 @@ async fn main() {
             let state = AppState {
                 buffer: buffer.clone(),
                 stream_tx: stream_tx.clone(),
+                shutdown: cancel.clone(),
             };
             let app = router(state);
             let addr = SocketAddr::from((args.bind, args.port));
@@ -121,13 +123,34 @@ async fn main() {
     };
 
     runtime::shutdown_signal().await;
+    info!("Shutdown signal received");
     cancel.cancel();
 
     if let Some(h) = web_handle {
-        let _ = h.await;
+        let mut h = h;
+        if tokio::time::timeout(Duration::from_secs(2), &mut h)
+            .await
+            .is_err()
+        {
+            // Force-exit if a long-lived connection prevents graceful shutdown.
+            // This is a safety net; the SSE handler also stops on cancellation.
+            h.abort();
+            let _ = h.await;
+        }
     }
     if let Some(h) = console_handle {
-        let _ = h.await;
+        let mut h = h;
+        if tokio::time::timeout(Duration::from_secs(2), &mut h).await.is_err() {
+            h.abort();
+            let _ = h.await;
+        }
     }
-    let _ = rpc_handle.await;
+    let mut rpc_handle = rpc_handle;
+    if tokio::time::timeout(Duration::from_secs(2), &mut rpc_handle)
+        .await
+        .is_err()
+    {
+        rpc_handle.abort();
+        let _ = rpc_handle.await;
+    }
 }

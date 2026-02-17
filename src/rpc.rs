@@ -220,24 +220,31 @@ pub async fn run_rpc_client_streamer(
     let mut since_ms: u64 = 0;
 
     loop {
-        if cancel.is_cancelled() {
-            break;
-        }
-
         if client.is_none() {
-            match tarpc::serde_transport::tcp::connect(addr, Json::default).await {
-                Ok(transport) => {
-                    client = Some(
-                        MetricsRpcClient::new(tarpc::client::Config::default(), transport).spawn(),
-                    );
-                    info!("RPC client connected to {}", addr);
+            let connect_fut = tarpc::serde_transport::tcp::connect(addr, Json::default);
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    break;
                 }
-                Err(e) => {
-                    error!("RPC connect error to {}: {}", addr, e);
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
+                res = connect_fut => {
+                    match res {
+                        Ok(transport) => {
+                            client = Some(
+                                MetricsRpcClient::new(tarpc::client::Config::default(), transport).spawn(),
+                            );
+                            info!("RPC client connected to {}", addr);
+                        }
+                        Err(e) => {
+                            error!("RPC connect error to {}: {}", addr, e);
+                            tokio::select! {
+                                _ = cancel.cancelled() => break,
+                                _ = tokio::time::sleep(Duration::from_millis(500)) => {}
+                            }
+                            continue;
+                        }
+                    }
                 }
-            }
+            };
         }
 
         let Some(c) = &client else {
@@ -248,20 +255,29 @@ pub async fn run_rpc_client_streamer(
         let long_poll_ms: u64 = 30_000;
         ctx.deadline = std::time::SystemTime::now() + Duration::from_millis(long_poll_ms + 1_000);
 
-        match c.next_after(ctx, since_ms, long_poll_ms).await {
-            Ok(Some(snap)) => {
-                // Keep moving forward even if remote clock is weird.
-                let ts = snap.timestamp_ms;
-                since_ms = ts.try_into().unwrap_or(u64::MAX);
-                (on_snapshot)(snap);
+        let req_fut = c.next_after(ctx, since_ms, long_poll_ms);
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                // Dropping the in-flight request triggers tarpc cancellation.
+                break;
             }
-            Ok(None) => {
-                // Timeout/no data; keep the connection and try again.
-                continue;
-            }
-            Err(e) => {
-                error!("RPC next_after error: {}", e);
-                client = None;
+            res = req_fut => {
+                match res {
+                    Ok(Some(snap)) => {
+                        // Keep moving forward even if remote clock is weird.
+                        let ts = snap.timestamp_ms;
+                        since_ms = ts.try_into().unwrap_or(u64::MAX);
+                        (on_snapshot)(snap);
+                    }
+                    Ok(None) => {
+                        // Timeout/no data; keep the connection and try again.
+                        continue;
+                    }
+                    Err(e) => {
+                        error!("RPC next_after error: {}", e);
+                        client = None;
+                    }
+                }
             }
         }
     }
