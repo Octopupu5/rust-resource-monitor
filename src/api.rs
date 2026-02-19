@@ -49,7 +49,6 @@ async fn health() -> impl IntoResponse {
 }
 
 async fn index() -> impl IntoResponse {
-    // Minimal page to quickly visualize responses; can be replaced later by full UI.
     Html(
         r#"<!doctype html>
 <html>
@@ -84,10 +83,28 @@ async fn index() -> impl IntoResponse {
     pre { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px; overflow: auto; }
     h1 { margin: 0 0 8px 0; }
     h3 { margin: 0 0 10px 0; }
+    .stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 10px; margin-bottom: 16px; }
+    .stat-card { text-align: center; padding: 10px 8px; }
+    .stat-label { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+    .stat-val { font-size: 20px; font-weight: 700; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   </style>
 </head>
 <body>
   <h1>Resource Monitor</h1>
+
+  <!-- Live stat cards -->
+  <div class="stat-grid">
+    <div class="stat-card panel"><div class="stat-label">CPU</div><div class="stat-val" id="sc-cpu">—</div></div>
+    <div class="stat-card panel"><div class="stat-label">Memory</div><div class="stat-val" id="sc-mem">—</div></div>
+    <div class="stat-card panel"><div class="stat-label">Load 1m</div><div class="stat-val" id="sc-la1">—</div></div>
+    <div class="stat-card panel"><div class="stat-label">Load 5m</div><div class="stat-val" id="sc-la5">—</div></div>
+    <div class="stat-card panel"><div class="stat-label">Load 15m</div><div class="stat-val" id="sc-la15">—</div></div>
+    <div class="stat-card panel"><div class="stat-label">Net RX</div><div class="stat-val" id="sc-rx">—</div></div>
+    <div class="stat-card panel"><div class="stat-label">Net TX</div><div class="stat-val" id="sc-tx">—</div></div>
+    <div class="stat-card panel"><div class="stat-label">Disk used</div><div class="stat-val" id="sc-disk">—</div></div>
+    <div class="stat-card panel"><div class="stat-label">Swap</div><div class="stat-val" id="sc-swap">—</div></div>
+  </div>
+
   <div class="topbar">
     <div class="controls">
       <span class="label">Time range</span>
@@ -133,6 +150,7 @@ async fn index() -> impl IntoResponse {
     </div>
   </div>
 
+  <!-- Row 1: CPU total, Memory, Network -->
   <div style="display:flex; gap:24px; flex-wrap:wrap;">
     <div class="panel">
       <h3>CPU total (%)</h3>
@@ -161,13 +179,77 @@ async fn index() -> impl IntoResponse {
     </div>
   </div>
 
-  <h3>Latest snapshot</h3>
+  <!-- Row 2: Load Average, Per-core CPU, Disk I/O, Swap -->
+  <div style="display:flex; gap:24px; flex-wrap:wrap; margin-top:20px;">
+    <div class="panel">
+      <h3>CPU Load Average</h3>
+      <div class="chart">
+        <canvas id="load" width="520" height="180"></canvas>
+        <canvas id="load-ov" class="overlay" width="520" height="180"></canvas>
+      </div>
+      <div style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px; margin-top: 6px;">
+        <span style="color:#e879f9;">1m</span> |
+        <span style="color:#a78bfa;">5m</span> |
+        <span style="color:#60a5fa;">15m</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Per-core CPU (%)</h3>
+      <div class="chart">
+        <canvas id="cores" width="520" height="180"></canvas>
+        <canvas id="cores-ov" class="overlay" width="520" height="180"></canvas>
+      </div>
+      <div style="font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; font-size: 12px; margin-top: 6px; color: var(--muted);" id="cores-legend"></div>
+    </div>
+    <div class="panel">
+      <h3>Disk space used (%)</h3>
+      <div class="chart">
+        <canvas id="disk" width="520" height="180"></canvas>
+        <canvas id="disk-ov" class="overlay" width="520" height="180"></canvas>
+      </div>
+    </div>
+    <div class="panel">
+      <h3>Swap used (%)</h3>
+      <div class="chart">
+        <canvas id="swap" width="520" height="180"></canvas>
+        <canvas id="swap-ov" class="overlay" width="520" height="180"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="margin-top:20px;">Latest snapshot</h3>
   <pre id="latest">Loading...</pre>
   <div id="tooltip"></div>
   <script>
     function clamp(x, lo, hi) {
       if (!Number.isFinite(x)) return lo;
       return Math.max(lo, Math.min(hi, x));
+    }
+
+    // Format bytes to human-readable string (B/s, KiB/s, MiB/s, GiB/s).
+    function fmtBytes(v, suffix) {
+      suffix = suffix || 'B/s';
+      if (!Number.isFinite(v) || v < 0) return '0 ' + suffix;
+      if (v >= 1073741824) return (v / 1073741824).toFixed(2) + ' Gi' + suffix;
+      if (v >= 1048576)    return (v / 1048576).toFixed(2)    + ' Mi' + suffix;
+      if (v >= 1024)       return (v / 1024).toFixed(1)       + ' Ki' + suffix;
+      return v.toFixed(0) + ' ' + suffix;
+    }
+
+    // Format a raw bytes/s value using the same axis scale as the chart (auto-detects unit from maxY).
+    function fmtBytesAuto(v, maxY) {
+      if (maxY >= 1073741824) return (v / 1073741824).toFixed(2) + ' GiB/s';
+      if (maxY >= 1048576)    return (v / 1048576).toFixed(2)    + ' MiB/s';
+      if (maxY >= 1024)       return (v / 1024).toFixed(1)       + ' KiB/s';
+      return v.toFixed(0) + ' B/s';
+    }
+
+    // Return a nice Y-axis label suffix and divisor for a given maximum value.
+    function byteScale(maxY) {
+      if (maxY >= 1073741824) return { div: 1073741824, unit: 'GiB/s' };
+      if (maxY >= 1048576)    return { div: 1048576,    unit: 'MiB/s' };
+      if (maxY >= 1024)       return { div: 1024,       unit: 'KiB/s' };
+      return { div: 1, unit: 'B/s' };
     }
 
     function drawLineChart(canvas, series, options) {
@@ -196,7 +278,7 @@ async fn index() -> impl IntoResponse {
       const minY = options.minY;
       const maxY = options.maxY;
       // Reserve space for axis labels to avoid overlaps (e.g. minY label vs time labels).
-      const leftPad = 54;
+      const leftPad = 64;
       const rightPad = 10;
       const topPad = 10;
       const bottomPad = 24;
@@ -205,7 +287,7 @@ async fn index() -> impl IntoResponse {
       canvas.__meta = { minX, maxX, minY, maxY, w, h, leftPad, rightPad, topPad, bottomPad };
 
       function xToPx(x) {
-        if (maxX === minX) return 0;
+        if (maxX === minX) return leftPad;
         return (x - minX) / (maxX - minX) * (w - leftPad - rightPad) + leftPad;
       }
       function yToPx(y) {
@@ -219,13 +301,20 @@ async fn index() -> impl IntoResponse {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
 
-      // Y-axis tick labels (more values than only min/max).
+      // Y-axis tick labels with byte-aware formatting when options.byteY is true.
       const yTicks = 5;
-      const yDecimals = (Math.abs(maxY - minY) >= 20 || maxY >= 20) ? 0 : 1;
+      const scale = options.byteY ? byteScale(maxY) : null;
       for (let i = 0; i < yTicks; i++) {
         const v = minY + (maxY - minY) * (i / (yTicks - 1));
         const py = yToPx(v);
-        ctx.fillText(String(v.toFixed(yDecimals)), 6, py);
+        let label;
+        if (scale) {
+          label = (v / scale.div).toFixed(v / scale.div >= 10 ? 0 : 1) + ' ' + scale.unit;
+        } else {
+          const dec = (Math.abs(maxY - minY) >= 20 || maxY >= 20) ? 0 : 1;
+          label = v.toFixed(dec);
+        }
+        ctx.fillText(label, 4, py);
       }
 
       // Time labels (x-axis) - more tick marks.
@@ -244,7 +333,7 @@ async fn index() -> impl IntoResponse {
 
       for (const s of series) {
         ctx.strokeStyle = s.color;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = s.lineWidth || 2;
         ctx.beginPath();
         for (let i = 0; i < xs.length; i++) {
           const px = xToPx(xs[i]);
@@ -268,17 +357,24 @@ async fn index() -> impl IntoResponse {
     let pausedEndTs = null;
 
     // Keep full in-browser buffer; chart view is a slice of it based on sliders.
-    let data = { xs: [], cpu: [], mem: [], rx: [], tx: [] };
+    let data = { xs: [], cpu: [], mem: [], rx: [], tx: [], la1: [], la5: [], la15: [], disk: [], swap: [], cores: [] };
     const tooltip = document.getElementById('tooltip');
     const overlays = {
-      cpu: document.getElementById('cpu-ov'),
-      mem: document.getElementById('mem-ov'),
-      net: document.getElementById('net-ov'),
+      cpu:   document.getElementById('cpu-ov'),
+      mem:   document.getElementById('mem-ov'),
+      net:   document.getElementById('net-ov'),
+      load:  document.getElementById('load-ov'),
+      cores: document.getElementById('cores-ov'),
+      disk:  document.getElementById('disk-ov'),
+      swap:  document.getElementById('swap-ov'),
     };
     let lastView = null;
+    // Auto-detected max for network chart (persists across redraws to avoid axis jumps).
+    let netMaxY = 1;
 
     function resetData() {
-      data = { xs: [], cpu: [], mem: [], rx: [], tx: [] };
+      data = { xs: [], cpu: [], mem: [], rx: [], tx: [], la1: [], la5: [], la15: [], disk: [], swap: [], cores: [] };
+      netMaxY = 1;
     }
 
     function pushDataPoint(p) {
@@ -289,17 +385,32 @@ async fn index() -> impl IntoResponse {
 
       data.xs.push(ts);
       data.cpu.push(p.cpu.total_usage_pct);
+
       const total = (p.memory.total_bytes || 0);
-      const used = (p.memory.used_bytes || 0);
+      const used  = (p.memory.used_bytes  || 0);
       data.mem.push(total === 0 ? 0 : used / total * 100);
+
+      const swapTotal = (p.memory.swap_total_bytes || 0);
+      const swapUsed  = (p.memory.swap_used_bytes  || 0);
+      data.swap.push(swapTotal === 0 ? 0 : swapUsed / swapTotal * 100);
+
       data.rx.push(p.network.rx_bytes_per_sec);
       data.tx.push(p.network.tx_bytes_per_sec);
+
+      data.la1.push(p.cpu.load_avg_1);
+      data.la5.push(p.cpu.load_avg_5);
+      data.la15.push(p.cpu.load_avg_15);
+
+      data.disk.push((p.disk && p.disk.used_pct) || 0);
+
+      // Store per-core snapshot as array-of-core-arrays indexed by time.
+      data.cores.push(Array.isArray(p.cpu.per_core_usage_pct) ? p.cpu.per_core_usage_pct : []);
 
       // Hard cap to avoid unbounded growth in the browser.
       const maxLen = 20000;
       if (data.xs.length > maxLen) {
         const drop = data.xs.length - maxLen;
-        for (const k of ['xs','cpu','mem','rx','tx']) data[k].splice(0, drop);
+        for (const k of ['xs','cpu','mem','rx','tx','la1','la5','la15','disk','swap','cores']) data[k].splice(0, drop);
       }
       updateEndSliderMax();
     }
@@ -317,11 +428,11 @@ async fn index() -> impl IntoResponse {
     function currentViewRange() {
       if (data.xs.length === 0) return null;
       const startTs = data.xs[0];
-      const endTs = data.xs[data.xs.length - 1];
+      const endTs   = data.xs[data.xs.length - 1];
 
-      const viewEnd = followLive ? endTs : (pausedEndTs ?? endTs);
-      const clampedEnd = clamp(viewEnd, startTs, endTs);
-      const viewStart = windowMs === 0 ? startTs : Math.max(startTs, clampedEnd - windowMs);
+      const viewEnd     = followLive ? endTs : (pausedEndTs ?? endTs);
+      const clampedEnd  = clamp(viewEnd, startTs, endTs);
+      const viewStart   = windowMs === 0 ? startTs : Math.max(startTs, clampedEnd - windowMs);
       return { startTs, endTs, viewStart, viewEnd: clampedEnd };
     }
 
@@ -330,14 +441,40 @@ async fn index() -> impl IntoResponse {
       if (!r) return null;
       const i0 = lowerBound(data.xs, r.viewStart);
       const i1 = lowerBound(data.xs, r.viewEnd + 1);
+
+      // Transpose per-core data: coreLines[coreIdx] = [...values over time...]
+      const coreCount = data.cores.length > 0
+        ? (data.cores[Math.min(i0, data.cores.length - 1)] || []).length
+        : 0;
+      const coreLines = [];
+      for (let c = 0; c < coreCount; c++) {
+        const ys = [];
+        for (let t = i0; t < i1; t++) {
+          ys.push((data.cores[t] || [])[c] ?? 0);
+        }
+        coreLines.push(ys);
+      }
+
       return {
-        xs: data.xs.slice(i0, i1),
-        cpu: data.cpu.slice(i0, i1),
-        mem: data.mem.slice(i0, i1),
-        rx: data.rx.slice(i0, i1),
-        tx: data.tx.slice(i0, i1),
+        xs:       data.xs.slice(i0, i1),
+        cpu:      data.cpu.slice(i0, i1),
+        mem:      data.mem.slice(i0, i1),
+        rx:       data.rx.slice(i0, i1),
+        tx:       data.tx.slice(i0, i1),
+        la1:      data.la1.slice(i0, i1),
+        la5:      data.la5.slice(i0, i1),
+        la15:     data.la15.slice(i0, i1),
+        disk:     data.disk.slice(i0, i1),
+        swap:     data.swap.slice(i0, i1),
+        coreLines,
         range: r,
       };
+    }
+
+    // Generate a visually distinct color for core index c out of n total cores.
+    function coreColor(c, n) {
+      const hue = Math.round((c / Math.max(n, 1)) * 360);
+      return `hsl(${hue}, 80%, 60%)`;
     }
 
     function redraw() {
@@ -352,23 +489,86 @@ async fn index() -> impl IntoResponse {
       }
       tooltip.style.display = 'none';
 
+      // --- CPU total ---
       drawLineChart(document.getElementById('cpu'), [{ ys: s.cpu, color: '#c44' }], {
-        xs: s.xs, minY: 0, maxY: 100
+        xs: s.xs, minY: 0, maxY: 100,
       });
-      // Memory line color is intentionally vivid for readability on dark background.
+
+      // --- Memory used % ---
       drawLineChart(document.getElementById('mem'), [{ ys: s.mem, color: '#f59e0b' }], {
-        xs: s.xs, minY: 0, maxY: 100
+        xs: s.xs, minY: 0, maxY: 100,
       });
-      const maxNet = Math.max(1, ...s.rx, ...s.tx);
+
+      // --- Network (auto-scaled bytes/s) ---
+      const maxNetView = Math.max(1, ...s.rx, ...s.tx);
+      netMaxY = Math.max(netMaxY, maxNetView);
       drawLineChart(document.getElementById('net'), [
         { ys: s.rx, color: '#0b6' },
         { ys: s.tx, color: '#06b' },
       ], {
-        xs: s.xs, minY: 0, maxY: maxNet * 1.1
+        xs: s.xs, minY: 0, maxY: netMaxY * 1.1, byteY: true,
+      });
+
+      // --- CPU Load Average ---
+      const maxLA = Math.max(0.1, ...s.la1, ...s.la5, ...s.la15);
+      drawLineChart(document.getElementById('load'), [
+        { ys: s.la1,  color: '#e879f9' },
+        { ys: s.la5,  color: '#a78bfa' },
+        { ys: s.la15, color: '#60a5fa' },
+      ], {
+        xs: s.xs, minY: 0, maxY: maxLA * 1.15,
+      });
+
+      // --- Per-core CPU ---
+      const n = s.coreLines.length;
+      const coreSeries = s.coreLines.map((ys, c) => ({
+        ys,
+        color: coreColor(c, n),
+        lineWidth: n > 8 ? 1 : 2,
+      }));
+      drawLineChart(document.getElementById('cores'), coreSeries, {
+        xs: s.xs, minY: 0, maxY: 100,
+      });
+      // Update core legend
+      const legend = document.getElementById('cores-legend');
+      if (legend) {
+        legend.innerHTML = s.coreLines.slice(0, 32).map((_, c) =>
+          `<span style="color:${coreColor(c, n)};">C${c}</span>`
+        ).join(' ');
+      }
+
+      // --- Disk space used % ---
+      drawLineChart(document.getElementById('disk'), [{ ys: s.disk, color: '#34d399' }], {
+        xs: s.xs, minY: 0, maxY: 100,
+      });
+
+      // --- Swap used % ---
+      drawLineChart(document.getElementById('swap'), [{ ys: s.swap, color: '#818cf8' }], {
+        xs: s.xs, minY: 0, maxY: 100,
       });
 
       updateRangeLabel(s.range, s.xs.length);
       drawTimeline();
+    }
+
+    function updateStatCards(p) {
+      const total = p.memory.total_bytes || 0;
+      const used  = p.memory.used_bytes  || 0;
+      const memPct = total === 0 ? 0 : (used / total * 100);
+      const swapTotal = p.memory.swap_total_bytes || 0;
+      const swapUsed  = p.memory.swap_used_bytes  || 0;
+      const swapPct   = swapTotal === 0 ? 0 : (swapUsed / swapTotal * 100);
+
+      const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+      set('sc-cpu',  p.cpu.total_usage_pct.toFixed(1) + '%');
+      set('sc-mem',  memPct.toFixed(1) + '%');
+      set('sc-la1',  p.cpu.load_avg_1.toFixed(2));
+      set('sc-la5',  p.cpu.load_avg_5.toFixed(2));
+      set('sc-la15', p.cpu.load_avg_15.toFixed(2));
+      set('sc-rx',   fmtBytes(p.network.rx_bytes_per_sec));
+      set('sc-tx',   fmtBytes(p.network.tx_bytes_per_sec));
+      set('sc-disk', ((p.disk && p.disk.used_pct) || 0).toFixed(1) + '%');
+      set('sc-swap', swapTotal === 0 ? 'N/A' : swapPct.toFixed(1) + '%');
     }
 
     function fmtTime(ms) {
@@ -387,22 +587,22 @@ async fn index() -> impl IntoResponse {
 
     function updateEndSliderMax() {
       const endSlider = document.getElementById('end-slider');
-      const endLabel = document.getElementById('end-slider-label');
+      const endLabel  = document.getElementById('end-slider-label');
       if (data.xs.length < 2) {
-        endSlider.max = 0;
+        endSlider.max   = 0;
         endSlider.value = 0;
         endLabel.textContent = 'live';
         return;
       }
       const startTs = data.xs[0];
-      const endTs = data.xs[data.xs.length - 1];
+      const endTs   = data.xs[data.xs.length - 1];
       const spanSec = Math.max(0, Math.floor((endTs - startTs) / 1000));
       endSlider.max = String(spanSec);
       if (followLive) {
         endSlider.value = String(spanSec);
       } else {
         const targetEnd = pausedEndTs ?? endTs;
-        const endSec = clamp(Math.floor((targetEnd - startTs) / 1000), 0, spanSec);
+        const endSec    = clamp(Math.floor((targetEnd - startTs) / 1000), 0, spanSec);
         endSlider.value = String(endSec);
       }
       endLabel.textContent = followLive ? 'live' : `paused (t-${spanSec - Number(endSlider.value || 0)}s)`;
@@ -412,7 +612,7 @@ async fn index() -> impl IntoResponse {
       const m = canvas.__meta;
       if (!m) return null;
       const { minX, maxX, w } = m;
-      const leftPad = m.leftPad ?? m.pad;
+      const leftPad  = m.leftPad  ?? m.pad;
       const rightPad = m.rightPad ?? m.pad;
       if (maxX === minX) return null;
       const x = clamp(xPx, leftPad, w - rightPad);
@@ -422,25 +622,25 @@ async fn index() -> impl IntoResponse {
 
     function xToPxFromMeta(m, x) {
       if (!m || m.maxX === m.minX) return m ? (m.leftPad ?? m.pad) : 0;
-      const leftPad = m.leftPad ?? m.pad;
+      const leftPad  = m.leftPad  ?? m.pad;
       const rightPad = m.rightPad ?? m.pad;
       return (x - m.minX) / (m.maxX - m.minX) * (m.w - leftPad - rightPad) + leftPad;
     }
 
     function yToPxFromMeta(m, y) {
-      const topPad = m.topPad ?? m.pad;
+      const topPad    = m.topPad    ?? m.pad;
       const bottomPad = m.bottomPad ?? m.pad;
       const t = (y - m.minY) / (m.maxY - m.minY);
       return (1 - clamp(t, 0, 1)) * (m.h - topPad - bottomPad) + topPad;
     }
 
     function resizeCanvasToDisplaySize(canvas) {
-      const dpr = window.devicePixelRatio || 1;
+      const dpr  = window.devicePixelRatio || 1;
       const rect = canvas.getBoundingClientRect();
-      const w = Math.max(1, Math.floor(rect.width * dpr));
-      const h = Math.max(1, Math.floor(rect.height * dpr));
+      const w    = Math.max(1, Math.floor(rect.width  * dpr));
+      const h    = Math.max(1, Math.floor(rect.height * dpr));
       if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
+        canvas.width  = w;
         canvas.height = h;
       }
       return { dpr, rect };
@@ -465,14 +665,14 @@ async fn index() -> impl IntoResponse {
 
       const minX = data.xs[0];
       const maxX = data.xs[data.xs.length - 1];
-      const pad = Math.round(6 * dpr);
+      const pad  = Math.round(6 * dpr);
       const minY = 0;
       const maxY = 100;
-      tl.__meta = { minX, maxX, minY, maxY, w, h, pad };
+      tl.__meta  = { minX, maxX, minY, maxY, w, h, pad };
 
       // Grid.
       ctx.strokeStyle = '#1c2740';
-      ctx.lineWidth = 1;
+      ctx.lineWidth   = 1;
       for (let i = 0; i <= 4; i++) {
         const y = (h * i) / 4;
         ctx.beginPath();
@@ -483,8 +683,8 @@ async fn index() -> impl IntoResponse {
 
       // Mini CPU line as context.
       ctx.strokeStyle = 'rgba(196, 68, 68, 0.8)';
-      ctx.lineWidth = 1;
-      const n = data.xs.length;
+      ctx.lineWidth   = 1;
+      const n    = data.xs.length;
       const step = Math.max(1, Math.floor(n / 600));
       ctx.beginPath();
       for (let i = 0; i < n; i += step) {
@@ -502,9 +702,9 @@ async fn index() -> impl IntoResponse {
 
       // Selection brush.
       ctx.save();
-      ctx.fillStyle = 'rgba(59, 130, 246, 0.20)';
+      ctx.fillStyle   = 'rgba(59, 130, 246, 0.20)';
       ctx.strokeStyle = 'rgba(59, 130, 246, 0.85)';
-      ctx.lineWidth = Math.max(1, Math.round(1 * dpr));
+      ctx.lineWidth   = Math.max(1, Math.round(1 * dpr));
       ctx.fillRect(x0, 0, Math.max(1, x1 - x0), h);
       ctx.beginPath();
       ctx.moveTo(x0, 0); ctx.lineTo(x0, h);
@@ -520,28 +720,28 @@ async fn index() -> impl IntoResponse {
       ctx.save();
       ctx.fillStyle = '#9ca3af';
       ctx.font = `${Math.max(10, Math.floor(11 * dpr))}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`;
-      const ticks = 6;
+      const ticks = 8;
       for (let i = 0; i < ticks; i++) {
-        const ts = minX + (maxX - minX) * (i / (ticks - 1));
-        const x = xToPxFromMeta(tl.__meta, ts);
+        const ts  = minX + (maxX - minX) * (i / (ticks - 1));
+        const x   = xToPxFromMeta(tl.__meta, ts);
         ctx.strokeStyle = 'rgba(28, 39, 64, 0.8)';
         ctx.beginPath();
         ctx.moveTo(x, h - Math.round(14 * dpr));
         ctx.lineTo(x, h);
         ctx.stroke();
         const txt = fmtTime(ts);
-        const tw = ctx.measureText(txt).width;
+        const tw  = ctx.measureText(txt).width;
         ctx.fillText(txt, clamp(x - tw / 2, pad, w - pad - tw), h - Math.round(2 * dpr));
       }
       ctx.restore();
 
-      // Boundary labels.
+      // Selection boundary labels.
       ctx.save();
       ctx.fillStyle = '#e5e7eb';
       ctx.font = `${Math.max(10, Math.floor(11 * dpr))}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace`;
       ctx.fillText(fmtTime(r.viewStart), clamp(x0 + 4 * dpr, pad, w - pad), Math.round(14 * dpr));
       const endTxt = fmtTime(r.viewEnd);
-      const endTw = ctx.measureText(endTxt).width;
+      const endTw  = ctx.measureText(endTxt).width;
       ctx.fillText(endTxt, clamp(x1 - endTw - 4 * dpr, pad, w - pad - endTw), Math.round(28 * dpr));
       ctx.restore();
 
@@ -553,16 +753,16 @@ async fn index() -> impl IntoResponse {
     function installTimelineBrush() {
       const tl = document.getElementById('timeline');
       if (!tl) return;
-      let dragging = false;
-      let mode = 'new'; // 'new' | 'move'
-      let startX = 0;
-      let curX = 0;
+      let dragging   = false;
+      let mode       = 'new'; // 'new' | 'move'
+      let startX     = 0;
+      let curX       = 0;
       let moveOffset = 0;
-      let selWidth = 0;
+      let selWidth   = 0;
 
       function pxFromEvent(e) {
         const rect = tl.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
+        const dpr  = window.devicePixelRatio || 1;
         return (e.clientX - rect.left) * dpr;
       }
 
@@ -580,11 +780,11 @@ async fn index() -> impl IntoResponse {
         if (!dragging) return;
         const ctx = tl.getContext('2d');
         const x0 = mode === 'move' ? (curX - moveOffset) : Math.min(startX, curX);
-        const x1 = mode === 'move' ? (x0 + selWidth) : Math.max(startX, curX);
+        const x1 = mode === 'move' ? (x0 + selWidth)     : Math.max(startX, curX);
         ctx.save();
-        ctx.fillStyle = 'rgba(147, 197, 253, 0.10)';
+        ctx.fillStyle   = 'rgba(147, 197, 253, 0.10)';
         ctx.strokeStyle = 'rgba(147, 197, 253, 0.85)';
-        ctx.lineWidth = 1;
+        ctx.lineWidth   = 1;
         ctx.fillRect(x0, 0, Math.max(1, x1 - x0), tl.height);
         ctx.beginPath();
         ctx.moveTo(x0, 0); ctx.lineTo(x0, tl.height);
@@ -596,17 +796,17 @@ async fn index() -> impl IntoResponse {
       tl.addEventListener('mousedown', (e) => {
         if (!tl.__meta) return;
         dragging = true;
-        const x = pxFromEvent(e);
+        const x  = pxFromEvent(e);
         const sel = selectionPx();
         if (sel && x >= sel.x0 && x <= sel.x1) {
-          mode = 'move';
+          mode       = 'move';
           moveOffset = x - sel.x0;
-          selWidth = sel.x1 - sel.x0;
-          curX = x;
+          selWidth   = sel.x1 - sel.x0;
+          curX       = x;
         } else {
-          mode = 'new';
+          mode   = 'new';
           startX = x;
-          curX = x;
+          curX   = x;
         }
         redrawWithOverlay();
       });
@@ -649,26 +849,26 @@ async fn index() -> impl IntoResponse {
           return;
         }
 
-        const viewStart = Math.min(t0, t1);
-        const viewEnd = Math.max(t0, t1);
-        const selectedMs = Math.max(1000, Math.floor(viewEnd - viewStart));
-        windowMs = selectedMs;
-        followLive = false;
-        pausedEndTs = Math.floor(viewEnd);
+        const viewStart   = Math.min(t0, t1);
+        const viewEnd     = Math.max(t0, t1);
+        const selectedMs  = Math.max(1000, Math.floor(viewEnd - viewStart));
+        windowMs          = selectedMs;
+        followLive        = false;
+        pausedEndTs       = Math.floor(viewEnd);
 
         // Update window slider label (slider itself is minutes, but we keep exact ms).
         const winSlider = document.getElementById('win-slider');
-        const winLabel = document.getElementById('win-slider-label');
+        const winLabel  = document.getElementById('win-slider-label');
         const minApprox = clamp(Math.round(selectedMs / 60000), 1, 60);
-        winSlider.value = String(minApprox);
+        winSlider.value  = String(minApprox);
         winLabel.textContent = `${minApprox}m*`;
 
         // Set end slider to selection end (pause live).
         const startTs = data.xs[0];
         const spanSec = Math.max(0, Math.floor((data.xs[data.xs.length - 1] - startTs) / 1000));
-        const endSec = clamp(Math.floor((viewEnd - startTs) / 1000), 0, spanSec);
+        const endSec  = clamp(Math.floor((viewEnd - startTs) / 1000), 0, spanSec);
         const endSlider = document.getElementById('end-slider');
-        endSlider.value = String(endSec);
+        endSlider.value  = String(endSec);
         updateEndSliderMax();
 
         // Refetch to make sure history around the selected range exists locally.
@@ -685,6 +885,8 @@ async fn index() -> impl IntoResponse {
       });
     }
 
+    // seriesSpec may be a static array or a zero-argument function that returns the array.
+    // Using a function allows specs that depend on runtime state (e.g. variable core count).
     function installHoverTooltip(baseCanvas, overlayCanvas, seriesSpec) {
       function clear() {
         const ctx = overlayCanvas.getContext('2d');
@@ -696,27 +898,27 @@ async fn index() -> impl IntoResponse {
       baseCanvas.addEventListener('mousemove', (e) => {
         if (!lastView || !baseCanvas.__meta || lastView.xs.length === 0) return;
         const rect = baseCanvas.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const ts = tsFromCanvasX(baseCanvas, x);
+        const x    = e.clientX - rect.left;
+        const ts   = tsFromCanvasX(baseCanvas, x);
         if (ts === null) return;
         const xs = lastView.xs;
         let i = lowerBound(xs, ts);
         if (i >= xs.length) i = xs.length - 1;
         if (i > 0) {
           const prev = xs[i - 1];
-          const cur = xs[i];
+          const cur  = xs[i];
           if (Math.abs(ts - prev) < Math.abs(cur - ts)) i = i - 1;
         }
 
         const meta = baseCanvas.__meta;
-        const xPx = xToPxFromMeta(meta, xs[i]);
+        const xPx  = xToPxFromMeta(meta, xs[i]);
 
         // Draw overlay (crosshair + points).
         const ctx = overlayCanvas.getContext('2d');
         ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
         ctx.save();
         ctx.strokeStyle = 'rgba(156, 163, 175, 0.55)';
-        ctx.lineWidth = 1;
+        ctx.lineWidth   = 1;
         ctx.beginPath();
         ctx.moveTo(xPx, 0);
         ctx.lineTo(xPx, overlayCanvas.height);
@@ -725,8 +927,10 @@ async fn index() -> impl IntoResponse {
         const rows = [];
         rows.push(`<div style="color:#9ca3af;">${fmtTime(xs[i])}</div>`);
 
-        for (const spec of seriesSpec) {
-          const v = spec.value(i);
+        // Resolve spec: support both a static array and a factory function.
+        const resolvedSpec = typeof seriesSpec === 'function' ? seriesSpec() : seriesSpec;
+        for (const spec of resolvedSpec) {
+          const v   = spec.value(i);
           const yPx = yToPxFromMeta(meta, v);
           ctx.fillStyle = spec.color;
           ctx.beginPath();
@@ -740,31 +944,31 @@ async fn index() -> impl IntoResponse {
         tooltip.innerHTML = rows.join('');
         tooltip.style.display = 'block';
         const pad = 12;
-        const tw = tooltip.offsetWidth;
-        const th = tooltip.offsetHeight;
-        let left = e.clientX + pad;
-        let top = e.clientY + pad;
-        if (left + tw > window.innerWidth - 8) left = e.clientX - tw - pad;
-        if (top + th > window.innerHeight - 8) top = e.clientY - th - pad;
+        const tw  = tooltip.offsetWidth;
+        const th  = tooltip.offsetHeight;
+        let left  = e.clientX + pad;
+        let top   = e.clientY + pad;
+        if (left + tw > window.innerWidth  - 8) left = e.clientX - tw - pad;
+        if (top  + th > window.innerHeight - 8) top  = e.clientY - th - pad;
         tooltip.style.left = `${Math.max(8, left)}px`;
-        tooltip.style.top = `${Math.max(8, top)}px`;
+        tooltip.style.top  = `${Math.max(8, top)}px`;
       });
     }
 
     function installDragZoom(canvas) {
       let dragging = false;
-      let startX = 0;
-      let curX = 0;
+      let startX   = 0;
+      let curX     = 0;
 
       function drawOverlay() {
         if (!dragging) return;
         const ctx = canvas.getContext('2d');
-        const x0 = Math.min(startX, curX);
-        const x1 = Math.max(startX, curX);
+        const x0  = Math.min(startX, curX);
+        const x1  = Math.max(startX, curX);
         ctx.save();
-        ctx.fillStyle = 'rgba(59, 130, 246, 0.18)';
+        ctx.fillStyle   = 'rgba(59, 130, 246, 0.18)';
         ctx.strokeStyle = 'rgba(59, 130, 246, 0.7)';
-        ctx.lineWidth = 1;
+        ctx.lineWidth   = 1;
         ctx.fillRect(x0, 0, Math.max(1, x1 - x0), canvas.height);
         ctx.beginPath();
         ctx.moveTo(x0, 0); ctx.lineTo(x0, canvas.height);
@@ -781,16 +985,16 @@ async fn index() -> impl IntoResponse {
       canvas.addEventListener('mousedown', (e) => {
         if (!canvas.__meta) return;
         dragging = true;
-        const r = canvas.getBoundingClientRect();
-        startX = e.clientX - r.left;
-        curX = startX;
+        const r  = canvas.getBoundingClientRect();
+        startX   = e.clientX - r.left;
+        curX     = startX;
         redrawWithOverlay();
       });
 
       window.addEventListener('mousemove', (e) => {
         if (!dragging) return;
         const r = canvas.getBoundingClientRect();
-        curX = e.clientX - r.left;
+        curX    = e.clientX - r.left;
         redrawWithOverlay();
       });
 
@@ -813,29 +1017,29 @@ async fn index() -> impl IntoResponse {
           return;
         }
 
-        const viewStart = Math.min(t0, t1);
-        const viewEnd = Math.max(t0, t1);
+        const viewStart  = Math.min(t0, t1);
+        const viewEnd    = Math.max(t0, t1);
         const selectedMs = Math.max(1000, Math.floor(viewEnd - viewStart));
 
         // Ensure we have enough history locally for a smooth scrub/zoom.
-        windowMs = selectedMs;
+        windowMs   = selectedMs;
         followLive = false;
         pausedEndTs = Math.floor(viewEnd);
 
         // Update window slider label (slider itself is minutes, but we keep exact ms).
         const winSlider = document.getElementById('win-slider');
-        const winLabel = document.getElementById('win-slider-label');
+        const winLabel  = document.getElementById('win-slider-label');
         const minApprox = clamp(Math.round(selectedMs / 60000), 1, 60);
-        winSlider.value = String(minApprox);
+        winSlider.value  = String(minApprox);
         winLabel.textContent = `${minApprox}m*`;
 
         // Move end slider to the selected end (pause live).
         if (data.xs.length >= 2) {
           const startTs = data.xs[0];
           const spanSec = Math.max(0, Math.floor((data.xs[data.xs.length - 1] - startTs) / 1000));
-          const endSec = clamp(Math.floor((viewEnd - startTs) / 1000), 0, spanSec);
+          const endSec  = clamp(Math.floor((viewEnd - startTs) / 1000), 0, spanSec);
           const endSlider = document.getElementById('end-slider');
-          endSlider.value = String(endSec);
+          endSlider.value  = String(endSec);
           updateEndSliderMax();
         }
 
@@ -846,12 +1050,12 @@ async fn index() -> impl IntoResponse {
 
       canvas.addEventListener('dblclick', async () => {
         // Reset to a sensible default: live + 3 minutes.
-        windowMs = 180000;
-        followLive = true;
+        windowMs    = 180000;
+        followLive  = true;
         pausedEndTs = null;
         const winSlider = document.getElementById('win-slider');
-        const winLabel = document.getElementById('win-slider-label');
-        winSlider.value = '3';
+        const winLabel  = document.getElementById('win-slider-label');
+        winSlider.value  = '3';
         winLabel.textContent = '3m';
         await refetchForCurrentView();
         redraw();
@@ -891,7 +1095,8 @@ async fn index() -> impl IntoResponse {
           const p = JSON.parse(ev.data);
           document.getElementById('latest').textContent = JSON.stringify(p, null, 2);
           pushDataPoint(p);
-          redraw();
+          updateStatCards(p);
+          if (followLive) redraw();
         } catch (e) {
           // Ignore malformed events.
         }
@@ -915,13 +1120,13 @@ async fn index() -> impl IntoResponse {
           applyActive(ms);
           // Sync slider for window size.
           const winSlider = document.getElementById('win-slider');
-          const winLabel = document.getElementById('win-slider-label');
+          const winLabel  = document.getElementById('win-slider-label');
           if (ms === 0) {
-            winSlider.value = '60';
+            winSlider.value  = '60';
             winLabel.textContent = 'All';
           } else {
             const min = Math.max(1, Math.round(ms / 60000));
-            winSlider.value = String(min);
+            winSlider.value  = String(min);
             winLabel.textContent = `${min}m`;
           }
           await refetchForCurrentView();
@@ -932,7 +1137,7 @@ async fn index() -> impl IntoResponse {
 
     function initSliders() {
       const winSlider = document.getElementById('win-slider');
-      const winLabel = document.getElementById('win-slider-label');
+      const winLabel  = document.getElementById('win-slider-label');
       winSlider.addEventListener('input', () => {
         const min = Number(winSlider.value);
         windowMs = min * 60000;
@@ -950,7 +1155,7 @@ async fn index() -> impl IntoResponse {
         followLive = Number(endSlider.value || 0) === Number(endSlider.max || 0);
         if (!followLive && data.xs.length > 0) {
           const startTs = data.xs[0];
-          pausedEndTs = Math.floor(startTs + Number(endSlider.value || 0) * 1000);
+          pausedEndTs   = Math.floor(startTs + Number(endSlider.value || 0) * 1000);
         } else if (followLive) {
           pausedEndTs = null;
         }
@@ -960,7 +1165,7 @@ async fn index() -> impl IntoResponse {
 
       const liveBtn = document.getElementById('live-btn');
       liveBtn.addEventListener('click', async () => {
-        followLive = true;
+        followLive  = true;
         pausedEndTs = null;
         updateEndSliderMax();
         await refetchForCurrentView();
@@ -984,14 +1189,40 @@ async fn index() -> impl IntoResponse {
       { label: 'Memory', color: '#f59e0b', value: (i) => lastView.mem[i], fmt: (v) => `${v.toFixed(1)}%` },
     ]);
     installHoverTooltip(document.getElementById('net'), document.getElementById('net-ov'), [
-      { label: 'RX', color: '#0b6', value: (i) => lastView.rx[i], fmt: (v) => `${v.toFixed(0)} B/s` },
-      { label: 'TX', color: '#06b', value: (i) => lastView.tx[i], fmt: (v) => `${v.toFixed(0)} B/s` },
+      { label: 'RX', color: '#0b6', value: (i) => lastView.rx[i], fmt: (v) => fmtBytes(v) },
+      { label: 'TX', color: '#06b', value: (i) => lastView.tx[i], fmt: (v) => fmtBytes(v) },
+    ]);
+    installHoverTooltip(document.getElementById('load'), document.getElementById('load-ov'), [
+      { label: '1m',  color: '#e879f9', value: (i) => lastView.la1[i],  fmt: (v) => v.toFixed(2) },
+      { label: '5m',  color: '#a78bfa', value: (i) => lastView.la5[i],  fmt: (v) => v.toFixed(2) },
+      { label: '15m', color: '#60a5fa', value: (i) => lastView.la15[i], fmt: (v) => v.toFixed(2) },
+    ]);
+    // Per-core tooltip: factory function so core count and colors match the current view exactly.
+    installHoverTooltip(document.getElementById('cores'), document.getElementById('cores-ov'), () => {
+      const n = lastView ? lastView.coreLines.length : 0;
+      const specs = [];
+      for (let c = 0; c < n; c++) {
+        const cc = c;
+        specs.push({
+          label: `C${cc}`,
+          color: coreColor(cc, n),
+          value: (i) => (lastView.coreLines[cc] || [])[i] ?? 0,
+          fmt:   (v) => `${v.toFixed(1)}%`,
+        });
+      }
+      return specs;
+    });
+    installHoverTooltip(document.getElementById('disk'), document.getElementById('disk-ov'), [
+      { label: 'Disk used', color: '#34d399', value: (i) => lastView.disk[i], fmt: (v) => `${v.toFixed(1)}%` },
+    ]);
+    installHoverTooltip(document.getElementById('swap'), document.getElementById('swap-ov'), [
+      { label: 'Swap', color: '#818cf8', value: (i) => lastView.swap[i], fmt: (v) => `${v.toFixed(1)}%` },
     ]);
 
-    // Drag-to-zoom on charts.
-    installDragZoom(document.getElementById('cpu'));
-    installDragZoom(document.getElementById('mem'));
-    installDragZoom(document.getElementById('net'));
+    // Drag-to-zoom on all charts.
+    for (const id of ['cpu', 'mem', 'net', 'load', 'cores', 'disk', 'swap']) {
+      installDragZoom(document.getElementById(id));
+    }
   </script>
 </body>
 </html>"#,

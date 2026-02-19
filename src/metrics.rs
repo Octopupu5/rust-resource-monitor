@@ -15,6 +15,8 @@ pub struct MemoryMetrics {
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub available_bytes: u64,
+    pub swap_total_bytes: u64,
+    pub swap_used_bytes: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26,11 +28,22 @@ pub struct NetworkMetrics {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DiskMetrics {
+    /// Sum of total space across all disks (bytes).
+    pub total_bytes: u64,
+    /// Sum of available space across all disks (bytes).
+    pub available_bytes: u64,
+    /// Overall used percentage: (total - available) / total * 100.
+    pub used_pct: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub timestamp_ms: u128,
     pub cpu: CpuMetrics,
     pub memory: MemoryMetrics,
     pub network: NetworkMetrics,
+    pub disk: DiskMetrics,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

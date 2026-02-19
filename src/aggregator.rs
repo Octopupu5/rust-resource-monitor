@@ -1,9 +1,11 @@
 use crate::bus::publish_snapshot;
 use crate::metrics::{
-    now_timestamp_ms, CpuMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics,
+    now_timestamp_ms, CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics,
 };
 use std::time::{Duration, Instant};
-use sysinfo::{CpuExt, CpuRefreshKind, NetworkExt, NetworksExt, RefreshKind, System, SystemExt};
+use sysinfo::{
+    CpuExt, CpuRefreshKind, DiskExt, NetworkExt, NetworksExt, RefreshKind, System, SystemExt,
+};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -40,6 +42,7 @@ impl Aggregator {
         sys.refresh_cpu();
         sys.refresh_memory();
         sys.refresh_networks();
+        sys.refresh_disks();
 
         let mut last_time = Instant::now();
         let mut last_rx_total: u64 = sum_network_rx(&sys);
@@ -78,6 +81,7 @@ impl Aggregator {
             sys.refresh_cpu();
             sys.refresh_memory();
             sys.refresh_networks();
+            sys.refresh_disks();
 
             let per_core: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
             let total_pct = if per_core.is_empty() {
@@ -87,13 +91,12 @@ impl Aggregator {
             };
             let la = sys.load_average();
 
-            let total_mem_bytes = sys.total_memory();
-            let used_mem_bytes = sys.used_memory();
-            let avail_mem_bytes = sys.available_memory();
-            // sysinfo returns KiB; convert to bytes
-            let total_mem_bytes = total_mem_bytes.saturating_mul(1024);
-            let used_mem_bytes = used_mem_bytes.saturating_mul(1024);
-            let avail_mem_bytes = avail_mem_bytes.saturating_mul(1024);
+            // sysinfo returns KiB; convert to bytes.
+            let total_mem_bytes = sys.total_memory().saturating_mul(1024);
+            let used_mem_bytes = sys.used_memory().saturating_mul(1024);
+            let avail_mem_bytes = sys.available_memory().saturating_mul(1024);
+            let swap_total_bytes = sys.total_swap().saturating_mul(1024);
+            let swap_used_bytes = sys.used_swap().saturating_mul(1024);
 
             let rx_total = sum_network_rx(&sys);
             let tx_total = sum_network_tx(&sys);
@@ -114,6 +117,14 @@ impl Aggregator {
                 0.0
             };
 
+            let disk_total = sum_disk_total(&sys);
+            let disk_avail = sum_disk_avail(&sys);
+            let disk_used_pct = if disk_total == 0 {
+                0.0
+            } else {
+                (disk_total.saturating_sub(disk_avail)) as f32 / disk_total as f32 * 100.0
+            };
+
             let snapshot = MetricsSnapshot {
                 timestamp_ms: now_timestamp_ms(),
                 cpu: CpuMetrics {
@@ -127,12 +138,19 @@ impl Aggregator {
                     total_bytes: total_mem_bytes,
                     used_bytes: used_mem_bytes,
                     available_bytes: avail_mem_bytes,
+                    swap_total_bytes,
+                    swap_used_bytes,
                 },
                 network: NetworkMetrics {
                     rx_bytes_total: rx_total,
                     tx_bytes_total: tx_total,
                     rx_bytes_per_sec: rx_rate,
                     tx_bytes_per_sec: tx_rate,
+                },
+                disk: DiskMetrics {
+                    total_bytes: disk_total,
+                    available_bytes: disk_avail,
+                    used_pct: disk_used_pct,
                 },
             };
 
@@ -155,4 +173,12 @@ fn sum_network_tx(sys: &System) -> u64 {
         .iter()
         .map(|(_, n)| n.total_transmitted())
         .sum()
+}
+
+fn sum_disk_total(sys: &System) -> u64 {
+    sys.disks().iter().map(|d| d.total_space()).sum()
+}
+
+fn sum_disk_avail(sys: &System) -> u64 {
+    sys.disks().iter().map(|d| d.available_space()).sum()
 }

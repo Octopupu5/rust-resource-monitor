@@ -1,5 +1,7 @@
 use resource_monitor::api::{router, AppState};
-use resource_monitor::metrics::{CpuMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics};
+use resource_monitor::metrics::{
+    CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics,
+};
 use resource_monitor::storage::MetricsBuffer;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -125,12 +127,19 @@ fn sample_snapshot(ts: u128) -> MetricsSnapshot {
             total_bytes: 100,
             used_bytes: 50,
             available_bytes: 50,
+            swap_total_bytes: 4096,
+            swap_used_bytes: 1024,
         },
         network: NetworkMetrics {
             rx_bytes_total: 1000,
             tx_bytes_total: 2000,
             rx_bytes_per_sec: 10.0,
             tx_bytes_per_sec: 20.0,
+        },
+        disk: DiskMetrics {
+            total_bytes: 500_000_000_000,
+            available_bytes: 200_000_000_000,
+            used_pct: 60.0,
         },
     }
 }
