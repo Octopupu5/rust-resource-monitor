@@ -7,6 +7,14 @@ const tooltip = document.getElementById('tooltip');
 let lastView = null;
 let hiddenSeries = {};
 
+let selectionStart = null;
+let selectionEnd = null;
+let isSelecting = false;
+let isDraggingWindow = false;
+let dragStartX = 0;
+let initialWindowStart = 0;
+let notificationTimeout = null;
+
 function clamp(x, lo, hi) {
     if (!Number.isFinite(x)) return lo;
     return Math.max(lo, Math.min(hi, x));
@@ -390,19 +398,41 @@ function drawTimeline() {
         ctx.stroke();
     }
 
-    if (windowStartMs) {
+    if (windowMs > 0 && windowStartMs) {
         const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (w - 2 * pad);
         const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (w - 2 * pad);
 
+        const clampedX0 = Math.max(pad, Math.min(w - pad, x0));
+        const clampedX1 = Math.max(pad, Math.min(w - pad, x1));
+
         ctx.fillStyle = 'rgba(59, 130, 246, 0.2)';
-        ctx.fillRect(x0, 0, x1 - x0, h);
+        ctx.fillRect(clampedX0, 0, clampedX1 - clampedX0, h);
 
         ctx.strokeStyle = '#3b82f6';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(x0, 0); ctx.lineTo(x0, h);
-        ctx.moveTo(x1, 0); ctx.lineTo(x1, h);
+        ctx.moveTo(clampedX0, 0); ctx.lineTo(clampedX0, h);
+        ctx.moveTo(clampedX1, 0); ctx.lineTo(clampedX1, h);
         ctx.stroke();
+    }
+
+    if (selectionStart !== null && selectionEnd !== null) {
+        const xStart = Math.max(pad, Math.min(w - pad, Math.min(selectionStart, selectionEnd)));
+        const xEnd = Math.max(pad, Math.min(w - pad, Math.max(selectionStart, selectionEnd)));
+
+        if (xEnd > xStart) {
+            ctx.fillStyle = 'rgba(236, 72, 153, 0.15)';
+            ctx.fillRect(xStart, 0, xEnd - xStart, h);
+
+            ctx.strokeStyle = '#ec4899';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(xStart, 0); ctx.lineTo(xStart, h);
+            ctx.moveTo(xEnd, 0); ctx.lineTo(xEnd, h);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
     }
 }
 
@@ -494,6 +524,42 @@ function setupChartHandlers() {
             ctx.lineTo(nearestXPos, overlayCanvas.height);
             ctx.stroke();
 
+            if (selectionStart !== null && selectionEnd !== null) {
+                const rect = document.getElementById('timeline').getBoundingClientRect();
+                const pad = 40;
+
+                ctx.strokeStyle = '#ec4899';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 5]);
+
+                const minX = meta.minX;
+                const maxX = meta.maxX;
+
+                const xStart = Math.min(selectionStart, selectionEnd);
+                const xEnd = Math.max(selectionStart, selectionEnd);
+
+                const timeStart = minX + ((xStart - pad) / (rect.width - 2 * pad)) * (maxX - minX);
+                const timeEnd = minX + ((xEnd - pad) / (rect.width - 2 * pad)) * (maxX - minX);
+
+                if (timeStart >= meta.minX && timeStart <= meta.maxX) {
+                    const xPosStart = meta.leftPad + ((timeStart - meta.minX) / (meta.maxX - meta.minX)) * (meta.w - meta.leftPad - meta.rightPad);
+                    ctx.beginPath();
+                    ctx.moveTo(xPosStart, 0);
+                    ctx.lineTo(xPosStart, overlayCanvas.height);
+                    ctx.stroke();
+                }
+
+                if (timeEnd >= meta.minX && timeEnd <= meta.maxX) {
+                    const xPosEnd = meta.leftPad + ((timeEnd - meta.minX) / (meta.maxX - meta.minX)) * (meta.w - meta.leftPad - meta.rightPad);
+                    ctx.beginPath();
+                    ctx.moveTo(xPosEnd, 0);
+                    ctx.lineTo(xPosEnd, overlayCanvas.height);
+                    ctx.stroke();
+                }
+
+                ctx.setLineDash([]);
+            }
+
             const seriesData = lastView.series[seriesName];
             if (!seriesData) return;
 
@@ -544,50 +610,231 @@ function setupTimelineDrag() {
     const tl = document.getElementById('timeline');
     if (!tl) return;
 
-    let isDragging = false;
-    let dragStartX = 0;
-    let initialWindowStart = 0;
-
     tl.addEventListener('mousedown', (e) => {
-        if (data.xs.length < 2 || !windowStartMs) return;
+        if (data.xs.length < 2) return;
 
-        isDragging = true;
         const rect = tl.getBoundingClientRect();
-        dragStartX = e.clientX - rect.left;
-        initialWindowStart = windowStartMs;
+        const x = e.clientX - rect.left;
+        const pad = 40;
 
-        tl.style.cursor = 'grabbing';
+        const clampedX = Math.max(pad, Math.min(rect.width - pad, x));
+
+        if (windowMs > 0 && windowStartMs) {
+            const minX = data.xs[0];
+            const maxX = data.xs[data.xs.length - 1];
+            const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
+            const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
+            if (clampedX >= x0 - 5 && clampedX <= x1 + 5) {
+                isDraggingWindow = true;
+                dragStartX = clampedX;
+                initialWindowStart = windowStartMs;
+                tl.style.cursor = 'grabbing';
+                return;
+            }
+        }
+        isSelecting = true;
+        selectionStart = clampedX;
+        selectionEnd = clampedX;
+        tl.style.cursor = 'crosshair';
     });
 
     window.addEventListener('mousemove', (e) => {
-        if (!isDragging || data.xs.length < 2) return;
+        if (!isDraggingWindow && !isSelecting) return;
+        if (data.xs.length < 2) return;
 
         const rect = tl.getBoundingClientRect();
         const currentX = e.clientX - rect.left;
-        const deltaX = currentX - dragStartX;
-        const deltaRatio = deltaX / rect.width;
+        const pad = 40;
+        const clampedX = Math.max(pad, Math.min(rect.width - pad, currentX));
 
-        const minX = data.xs[0];
-        const maxX = data.xs[data.xs.length - 1];
-        const timeRange = maxX - minX;
+        if (isDraggingWindow) {
+            const deltaX = clampedX - dragStartX;
+            const deltaRatio = deltaX / (rect.width - 2 * pad);
 
-        let newStart = initialWindowStart + deltaRatio * timeRange;
-        newStart = clamp(newStart, minX, maxX - windowMs);
+            const minX = data.xs[0];
+            const maxX = data.xs[data.xs.length - 1];
+            const timeRange = maxX - minX;
 
-        windowStartMs = newStart;
-        pausedEndTs = windowStartMs + windowMs;
-        followLive = (pausedEndTs >= maxX - 1000);
-        
-        updateEndSlider();
-        drawAllCharts();
+            let newStart = initialWindowStart + deltaRatio * timeRange;
+            newStart = clamp(newStart, minX, maxX - (windowMs || 60000));
+
+            windowStartMs = newStart;
+            pausedEndTs = windowStartMs + (windowMs || 60000);
+
+            const maxPossibleEnd = maxX;
+            followLive = (pausedEndTs >= maxPossibleEnd - 1000);
+
+            updateEndSlider();
+            drawAllCharts();
+        } else if (isSelecting && selectionStart !== null) {
+            selectionEnd = clampedX;
+            drawTimeline();
+
+            const rect = tl.getBoundingClientRect();
+            const pad = 40;
+            const rightEdge = rect.width - pad;
+
+            if (Math.abs(clampedX - rightEdge) < 5) {
+                showNotification('Release to switch to live mode', 1000);
+            }
+        }
     });
 
     window.addEventListener('mouseup', () => {
-        if (isDragging) {
-            isDragging = false;
-            tl.style.cursor = 'default';
+        if (isSelecting && selectionStart !== null && selectionEnd !== null) {
+            const rect = tl.getBoundingClientRect();
+            const pad = 40;
+
+            const xStart = Math.min(selectionStart, selectionEnd);
+            const xEnd = Math.max(selectionStart, selectionEnd);
+
+            const rightEdge = rect.width - pad;
+            const reachedLive = Math.abs(xEnd - rightEdge) < 10;
+
+            if (reachedLive) {
+                followLive = true;
+                pausedEndTs = null;
+                windowStartMs = null;
+
+                const winSlider = document.getElementById('win-slider');
+                const winLabel = document.getElementById('win-slider-label');
+                const endSlider = document.getElementById('end-slider');
+                const endLabel = document.getElementById('end-slider-label');
+
+                windowMs = 180000;
+                winSlider.value = '3';
+                winLabel.textContent = '3m';
+
+                endSlider.value = endSlider.max;
+                endLabel.textContent = 'live';
+
+                document.querySelectorAll('button[data-win]').forEach(b => b.classList.remove('active'));
+                document.querySelector('button[data-win="180000"]')?.classList.add('active');
+
+                drawAllCharts();
+                showNotification('Switched to live mode');
+            } else if (xEnd - xStart > 5) {
+
+                const minX = data.xs[0];
+                const maxX = data.xs[data.xs.length - 1];
+
+                const timeStart = minX + ((xStart - pad) / (rect.width - 2 * pad)) * (maxX - minX);
+                const timeEnd = minX + ((xEnd - pad) / (rect.width - 2 * pad)) * (maxX - minX);
+
+                windowMs = timeEnd - timeStart;
+                windowStartMs = timeStart;
+                pausedEndTs = timeEnd;
+                followLive = false;
+
+                const winSlider = document.getElementById('win-slider');
+                const winLabel = document.getElementById('win-slider-label');
+                
+                if (windowMs >= 60000) {
+                    const mins = Math.round(windowMs / 60000);
+                    winSlider.value = Math.min(60, Math.max(1, mins));
+                    winLabel.textContent = (mins >= 60 ? '60' : mins) + 'm';
+                } else {
+                    winSlider.value = '1';
+                    winLabel.textContent = '1m';
+                }
+
+                document.querySelectorAll('button[data-win]').forEach(b => b.classList.remove('active'));
+
+                updateEndSlider();
+                drawAllCharts();
+
+                const durationSec = Math.round(windowMs / 1000);
+                const durationMin = Math.floor(durationSec / 60);
+                const durationRemSec = durationSec % 60;
+                
+                if (durationMin > 0) {
+                    showNotification(`Selected range: ${durationMin}m ${durationRemSec}s (${fmtTime(timeStart)} - ${fmtTime(timeEnd)})`);
+                } else {
+                    showNotification(`Selected range: ${durationSec}s (${fmtTime(timeStart)} - ${fmtTime(timeEnd)})`);
+                }
+            } else {
+                if (windowMs > 0 && windowStartMs) {
+                    const minX = data.xs[0];
+                    const maxX = data.xs[data.xs.length - 1];
+                    const clickTime = minX + ((xStart - pad) / (rect.width - 2 * pad)) * (maxX - minX);
+                    
+                    windowStartMs = clamp(clickTime - windowMs/2, minX, maxX - windowMs);
+                    pausedEndTs = windowStartMs + windowMs;
+                    followLive = false;
+                    
+                    updateEndSlider();
+                    drawAllCharts();
+                }
+            }
         }
+
+        isDraggingWindow = false;
+        isSelecting = false;
+        selectionStart = null;
+        selectionEnd = null;
+        tl.style.cursor = 'default';
+        drawTimeline();
     });
+
+    tl.addEventListener('dblclick', () => {
+        followLive = true;
+        pausedEndTs = null;
+        windowStartMs = null;
+        
+        const winSlider = document.getElementById('win-slider');
+        const winLabel = document.getElementById('win-slider-label');
+        winSlider.value = '3';
+        winLabel.textContent = '3m';
+        windowMs = 180000;
+        
+        document.querySelectorAll('button[data-win]').forEach(b => b.classList.remove('active'));
+        document.querySelector('button[data-win="180000"]')?.classList.add('active');
+        
+        updateEndSlider();
+        drawAllCharts();
+        
+        showNotification('Returned to live mode');
+    });
+}
+
+function showNotification(message, duration = 3000) {
+    let notification = document.getElementById('timeline-notification');
+    if (!notification) {
+        notification = document.createElement('div');
+        notification.id = 'timeline-notification';
+        notification.style.cssText = `
+            position: fixed;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #1b2a4a;
+            color: #e5e7eb;
+            padding: 10px 20px;
+            border-radius: 24px;
+            font-size: 14px;
+            font-family: ui-monospace, monospace;
+            border: 1px solid #3b82f6;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            z-index: 2000;
+            transition: opacity 0.3s;
+            white-space: nowrap;
+            max-width: 90%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        `;
+        document.body.appendChild(notification);
+    }
+    
+    notification.textContent = message;
+    notification.style.opacity = '1';
+    
+    if (window.notificationTimeout) {
+        clearTimeout(window.notificationTimeout);
+    }
+    
+    window.notificationTimeout = setTimeout(() => {
+        notification.style.opacity = '0';
+    }, duration);
 }
 
 function updateRangeLabel(view) {
