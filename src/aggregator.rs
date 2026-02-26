@@ -1,12 +1,14 @@
 use crate::bus::publish_snapshot;
 use crate::metrics::{
-    now_timestamp_ms, CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics,
+    now_timestamp_ms, BatteryMetrics, CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot,
+    NetworkMetrics,
 };
+use battery::{Manager, State};
 use std::time::{Duration, Instant};
 use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct AggregatorConfig {
     pub interval: Duration,
@@ -37,9 +39,6 @@ impl Aggregator {
         );
 
         sys.refresh_all();
-        // Для сетей и дисков refresh требует аргумент bool:
-        // true - обновлять список интерфейсов/дисков
-        // false - только обновлять данные существующих
         networks.refresh(true);
         disks.refresh(true);
 
@@ -80,7 +79,18 @@ impl Aggregator {
             networks.refresh(false);
             disks.refresh(false);
 
-            // Получаем информацию о CPU
+            // Получаем данные о батарее - инициализируем менеджер каждый раз
+            // или сохраняем в локальную переменную внутри цикла
+            let battery_metrics = get_battery_metrics();
+
+            // Логируем данные о батарее для отладки
+            if let Some(battery) = &battery_metrics {
+                debug!(
+                    "Battery: {}% ({}), Power: {}W, Time to empty: {:?}",
+                    battery.percentage, battery.state, battery.power_now, battery.time_to_empty
+                );
+            }
+
             let per_core: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
             let total_pct = if per_core.is_empty() {
                 0.0
@@ -89,11 +99,6 @@ impl Aggregator {
             };
 
             let la = System::load_average();
-            println!("=== LOAD AVERAGE DEBUG ===");
-            println!("la.one: {}", la.one);
-            println!("la.five: {}", la.five);
-            println!("la.fifteen: {}", la.fifteen);
-            println!("==========================");
 
             let total_mem_bytes = sys.total_memory().saturating_mul(1024);
             let used_mem_bytes = sys.used_memory().saturating_mul(1024);
@@ -136,6 +141,7 @@ impl Aggregator {
                     load_avg_1: la.one as f32,
                     load_avg_5: la.five as f32,
                     load_avg_15: la.fifteen as f32,
+                    temperature_celsius: None,
                 },
                 memory: MemoryMetrics {
                     total_bytes: total_mem_bytes,
@@ -155,6 +161,7 @@ impl Aggregator {
                     available_bytes: disk_avail,
                     used_pct: disk_used_pct,
                 },
+                battery: battery_metrics,
             };
 
             publish_snapshot(snapshot);
@@ -164,6 +171,59 @@ impl Aggregator {
             last_tx_total = tx_total;
             is_first = false;
         }
+    }
+}
+
+fn get_battery_metrics() -> Option<BatteryMetrics> {
+    let manager = match Manager::new() {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("Failed to initialize battery manager: {}", e);
+            return None;
+        }
+    };
+
+    let mut batteries = match manager.batteries() {
+        Ok(b) => b,
+        Err(e) => {
+            debug!("Failed to get batteries: {}", e);
+            return None;
+        }
+    };
+
+    if let Some(Ok(battery)) = batteries.next() {
+        let state = match battery.state() {
+            State::Charging => "Charging",
+            State::Discharging => "Discharging",
+            State::Empty => "Empty",
+            State::Full => "Full",
+            _ => "Unknown",
+        };
+
+        let time_to_empty = battery.time_to_empty().map(|t| {
+            let seconds = t.get::<battery::units::time::second>();
+            seconds.round() as u64
+        });
+
+        let time_to_full = battery.time_to_full().map(|t| {
+            let seconds = t.get::<battery::units::time::second>();
+            seconds.round() as u64
+        });
+
+        Some(BatteryMetrics {
+            percentage: battery.state_of_charge().value * 100.0,
+            voltage: battery.voltage().value,
+            temperature: battery.temperature().map(|t| t.value),
+            energy_full: battery.energy_full().value as u64,
+            energy_now: battery.energy().value as u64,
+            power_now: battery.energy_rate().value,
+            time_to_empty,
+            time_to_full,
+            state: state.to_string(),
+        })
+    } else {
+        debug!("No batteries found");
+        None
     }
 }
 

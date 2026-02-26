@@ -122,6 +122,7 @@ fn sample_snapshot(ts: u128) -> MetricsSnapshot {
             load_avg_1: 0.1,
             load_avg_5: 0.2,
             load_avg_15: 0.3,
+            temperature_celsius: Some(50.0),
         },
         memory: MemoryMetrics {
             total_bytes: 100,
@@ -141,5 +142,6 @@ fn sample_snapshot(ts: u128) -> MetricsSnapshot {
             available_bytes: 200_000_000_000,
             used_pct: 60.0,
         },
+        battery: None,
     }
 }
