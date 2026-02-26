@@ -683,7 +683,7 @@ function setupChartHandlers() {
             const seriesData = lastView.series[seriesName];
             if (!seriesData) return;
 
-            const rows = [`<div style="color:#9ca3af;">${fmtTime(xs[nearestIdx])}</div>`];
+            const rows = [`<div style="color:#9ca3af; margin-bottom: 4px;">${fmtTime(xs[nearestIdx])}</div>`];
 
             for (let j = 0; j < seriesData.legend.length; j++) {
                 if (hiddenSeries[seriesName]?.[j]) continue;
@@ -705,8 +705,15 @@ function setupChartHandlers() {
                 ctx.beginPath();
                 ctx.arc(nearestXPos, yPos, 5, 0, Math.PI * 2);
                 ctx.stroke();
+
+                let formattedValue = formatValue(v, seriesData.format);
+
+                let displayText = `<span style="color:${legend.color};">${legend.name}</span>: ${formattedValue}`;
+                if (legend.comment) {
+                    displayText += ` <span style="color:#9ca3af; font-size: 11px;">(${legend.comment})</span>`;
+                }
                 
-                rows.push(`<div><span style="color:${legend.color};">${legend.name}</span>: ${formatValue(v, seriesData.format)}</div>`);
+                rows.push(`<div style="margin: 2px 0;">${displayText}</div>`);
             }
             
             tooltip.innerHTML = rows.join('');
@@ -725,7 +732,6 @@ function setupChartHandlers() {
         });
     });
 }
-
 function setupTimelineDrag() {
     const tl = document.getElementById('timeline');
     if (!tl) return;

@@ -20,6 +20,8 @@ pub struct MetricSeries {
 pub struct MetricLegend {
     pub name: String,
     pub color: String,
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,6 +118,7 @@ impl MetricsSnapshot {
                 legend: vec![MetricLegend {
                     name: "CPU".to_string(),
                     color: "#c44".to_string(),
+                    comment: None,
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
             },
@@ -134,6 +137,7 @@ impl MetricsSnapshot {
                         MetricLegend {
                             name: format!("C{}", i),
                             color: format!("hsl({}, 80%, 60%)", hue),
+                            comment: None,
                         }
                     })
                     .collect(),
@@ -152,14 +156,17 @@ impl MetricsSnapshot {
                     MetricLegend {
                         name: "1m".to_string(),
                         color: "#e879f9".to_string(),
+                        comment: None,
                     },
                     MetricLegend {
                         name: "5m".to_string(),
                         color: "#a78bfa".to_string(),
+                        comment: None,
                     },
                     MetricLegend {
                         name: "15m".to_string(),
                         color: "#60a5fa".to_string(),
+                        comment: None,
                     },
                 ],
                 format: DisplayFormat::Float { decimals: 2 },
@@ -172,6 +179,7 @@ impl MetricsSnapshot {
                 legend: vec![MetricLegend {
                     name: "Memory".to_string(),
                     color: "#f59e0b".to_string(),
+                    comment: None,
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
             },
@@ -183,6 +191,7 @@ impl MetricsSnapshot {
                 legend: vec![MetricLegend {
                     name: "Swap".to_string(),
                     color: "#818cf8".to_string(),
+                    comment: None,
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
             },
@@ -195,10 +204,12 @@ impl MetricsSnapshot {
                     MetricLegend {
                         name: "RX".to_string(),
                         color: "#0b6".to_string(),
+                        comment: None,
                     },
                     MetricLegend {
                         name: "TX".to_string(),
                         color: "#06b".to_string(),
+                        comment: None,
                     },
                 ],
                 format: DisplayFormat::Bytes {
@@ -213,6 +224,7 @@ impl MetricsSnapshot {
                 legend: vec![MetricLegend {
                     name: "Disk".to_string(),
                     color: "#34d399".to_string(),
+                    comment: None,
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
             },
@@ -227,8 +239,9 @@ impl MetricsSnapshot {
                     beautiful_name: "Battery Level".to_string(),
                     series: vec![battery.percentage],
                     legend: vec![MetricLegend {
-                        name: battery.state.clone(),
+                        name: "Level".to_string(),
                         color: get_battery_color(battery.percentage),
+                        comment: Some(battery.state.clone()),
                     }],
                     format: DisplayFormat::Percentage { decimals: 1 },
                 },
@@ -240,6 +253,7 @@ impl MetricsSnapshot {
                     legend: vec![MetricLegend {
                         name: "Power".to_string(),
                         color: "#fbbf24".to_string(),
+                        comment: None,
                     }],
                     format: DisplayFormat::Float { decimals: 2 },
                 },
