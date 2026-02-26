@@ -4,7 +4,7 @@ use crate::metrics::{
 };
 use std::time::{Duration, Instant};
 use sysinfo::{
-    CpuExt, CpuRefreshKind, DiskExt, NetworkExt, NetworksExt, RefreshKind, System, SystemExt,
+    CpuRefreshKind, MemoryRefreshKind, Networks, Disks, RefreshKind, System,
 };
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
@@ -30,23 +30,28 @@ impl Aggregator {
     }
 
     pub async fn run(self, cancel: CancellationToken) {
-        let refresh = RefreshKind::new()
-            .with_cpu(CpuRefreshKind::everything())
-            .with_memory()
-            .with_components()
-            .with_disks_list()
-            .with_disks();
-        let mut sys = System::new_with_specifics(refresh);
+        // Создаем отдельные структуры для сетей и дисков
+        let mut networks = Networks::new_with_refreshed_list();
+        let mut disks = Disks::new_with_refreshed_list();
+        
+        // Создаем систему с нужными компонентами
+        let mut sys = System::new_with_specifics(
+            RefreshKind::everything()
+                .with_cpu(CpuRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything())
+        );
 
-        // Initialize once before loop to compute deltas.
-        sys.refresh_cpu();
-        sys.refresh_memory();
-        sys.refresh_networks();
-        sys.refresh_disks();
+        // Инициализация для вычисления дельт - обновляем все сразу
+        sys.refresh_all();
+        // Для сетей и дисков refresh требует аргумент bool:
+        // true - обновлять список интерфейсов/дисков
+        // false - только обновлять данные существующих
+        networks.refresh(true);
+        disks.refresh(true);
 
         let mut last_time = Instant::now();
-        let mut last_rx_total: u64 = sum_network_rx(&sys);
-        let mut last_tx_total: u64 = sum_network_tx(&sys);
+        let mut last_rx_total: u64 = sum_network_rx(&networks);
+        let mut last_tx_total: u64 = sum_network_tx(&networks);
 
         info!(
             "Aggregator started with interval {:?}",
@@ -56,8 +61,8 @@ impl Aggregator {
         let mut ticker = tokio::time::interval(self.config.interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut is_first = true;
+        
         loop {
-            // interval() ticks immediately on the first await, which gives us a fast first sample.
             tokio::select! {
                 _ = cancel.cancelled() => {
                     break;
@@ -77,29 +82,37 @@ impl Aggregator {
                 continue;
             }
 
-            // Refresh subsets to keep overhead low.
-            sys.refresh_cpu();
-            sys.refresh_memory();
-            sys.refresh_networks();
-            sys.refresh_disks();
+            // Обновляем все данные
+            sys.refresh_all();
+            // Обновляем сети и диски (false = только данные, без изменения списка)
+            networks.refresh(false);
+            disks.refresh(false);
 
+            // Получаем информацию о CPU
             let per_core: Vec<f32> = sys.cpus().iter().map(|c| c.cpu_usage()).collect();
             let total_pct = if per_core.is_empty() {
                 0.0
             } else {
                 per_core.iter().sum::<f32>() / per_core.len() as f32
             };
-            let la = sys.load_average();
+            
+            // В sysinfo 0.38 load_average() - ассоциированная функция
+            let la = System::load_average();
+            println!("=== LOAD AVERAGE DEBUG ===");
+            println!("la.one: {}", la.one);
+            println!("la.five: {}", la.five);
+            println!("la.fifteen: {}", la.fifteen);
+            println!("==========================");
 
-            // sysinfo returns KiB; convert to bytes.
+            // sysinfo возвращает KiB, конвертируем в байты
             let total_mem_bytes = sys.total_memory().saturating_mul(1024);
             let used_mem_bytes = sys.used_memory().saturating_mul(1024);
             let avail_mem_bytes = sys.available_memory().saturating_mul(1024);
             let swap_total_bytes = sys.total_swap().saturating_mul(1024);
             let swap_used_bytes = sys.used_swap().saturating_mul(1024);
 
-            let rx_total = sum_network_rx(&sys);
-            let tx_total = sum_network_tx(&sys);
+            let rx_total = sum_network_rx(&networks);
+            let tx_total = sum_network_tx(&networks);
             let rx_rate = if is_first {
                 0.0
             } else if rx_total >= last_rx_total {
@@ -117,8 +130,8 @@ impl Aggregator {
                 0.0
             };
 
-            let disk_total = sum_disk_total(&sys);
-            let disk_avail = sum_disk_avail(&sys);
+            let disk_total = sum_disk_total(&disks);
+            let disk_avail = sum_disk_avail(&disks);
             let disk_used_pct = if disk_total == 0 {
                 0.0
             } else {
@@ -164,21 +177,19 @@ impl Aggregator {
     }
 }
 
-fn sum_network_rx(sys: &System) -> u64 {
-    sys.networks().iter().map(|(_, n)| n.total_received()).sum()
+// Функции теперь принимают Networks и Disks вместо System
+fn sum_network_rx(networks: &Networks) -> u64 {
+    networks.iter().fold(0, |acc, (_, data)| acc + data.total_received())
 }
 
-fn sum_network_tx(sys: &System) -> u64 {
-    sys.networks()
-        .iter()
-        .map(|(_, n)| n.total_transmitted())
-        .sum()
+fn sum_network_tx(networks: &Networks) -> u64 {
+    networks.iter().fold(0, |acc, (_, data)| acc + data.total_transmitted())
 }
 
-fn sum_disk_total(sys: &System) -> u64 {
-    sys.disks().iter().map(|d| d.total_space()).sum()
+fn sum_disk_total(disks: &Disks) -> u64 {
+    disks.iter().fold(0, |acc, disk| acc + disk.total_space())
 }
 
-fn sum_disk_avail(sys: &System) -> u64 {
-    sys.disks().iter().map(|d| d.available_space()).sum()
+fn sum_disk_avail(disks: &Disks) -> u64 {
+    disks.iter().fold(0, |acc, disk| acc + disk.available_space())
 }
