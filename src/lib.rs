@@ -7,3 +7,4 @@ pub mod metrics;
 pub mod rpc;
 pub mod runtime;
 pub mod storage;
+pub mod web;

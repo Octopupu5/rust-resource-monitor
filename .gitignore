@@ -2,4 +2,4 @@
 Cargo.lock
 .DS_Store
 main.py
-.*txt
+*.txt
