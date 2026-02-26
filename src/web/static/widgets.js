@@ -167,12 +167,13 @@ function pushDataPoint(rpcSnapshot) {
         if (!data.series[series.name]) {
             data.series[series.name] = {
                 values: [],
-                legend: series.legend,
+                legends: [],
                 format: series.format,
                 beautiful_name: series.beautiful_name
             };
         }
         data.series[series.name].values.push(series.series);
+        data.series[series.name].legends.push(series.legend);
     });
 
     const maxLen = 20000;
@@ -181,6 +182,7 @@ function pushDataPoint(rpcSnapshot) {
         data.xs.splice(0, drop);
         Object.keys(data.series).forEach(name => {
             data.series[name].values.splice(0, drop);
+            data.series[name].legends.splice(0, drop);
         });
     }
 
@@ -245,18 +247,34 @@ function drawAllCharts() {
         const seriesData = view.series[name];
         const seriesList = [];
 
-        for (let i = 0; i < seriesData.legend.length; i++) {
-            if (hiddenSeries[name]?.[i]) continue;
-            
-            const legend = seriesData.legend[i];
+        let maxLines = 0;
+        for (let i = view.startIdx; i < view.endIdx; i++) {
+            const values = seriesData.values[i] || [];
+            maxLines = Math.max(maxLines, values.length);
+        }
+
+        for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
+            if (hiddenSeries[name]?.[lineIdx]) continue;
+
             const ys = [];
-            for (let j = view.startIdx; j < view.endIdx; j++) {
-                ys.push(seriesData.values[j]?.[i] || 0);
+            let color = '#888';
+            for (let i = view.endIdx - 1; i >= view.startIdx; i--) {
+                const legends = seriesData.legends[i] || [];
+                if (legends[lineIdx]) {
+                    color = legends[lineIdx].color;
+                    break;
+                }
             }
+            
+            for (let j = view.startIdx; j < view.endIdx; j++) {
+                ys.push(seriesData.values[j]?.[lineIdx] || 0);
+            }
+            
             seriesList.push({
                 ys: ys,
-                color: legend.color,
-                lineWidth: seriesData.legend.length > 8 ? 1 : 2
+                color: color,
+                lineWidth: maxLines > 8 ? 1 : 2,
+                lineIdx: lineIdx
             });
         }
 
@@ -275,7 +293,10 @@ function drawAllCharts() {
             xs: view.xs,
             minY: minY,
             maxY: maxY,
-            byteY: seriesData.format?.type === 'Bytes'
+            byteY: seriesData.format?.type === 'Bytes',
+            seriesName: name,
+            seriesData: seriesData,
+            startIdx: view.startIdx
         });
     });
 
@@ -321,7 +342,10 @@ function drawLineChart(canvas, series, options) {
         leftPad, 
         rightPad, 
         topPad, 
-        bottomPad 
+        bottomPad,
+        seriesName: options.seriesName,
+        seriesData: options.seriesData,
+        startIdx: options.startIdx
     };
 
     const xScale = (maxX === minX) ? 0 : (w - leftPad - rightPad) / (maxX - minX);
@@ -633,6 +657,7 @@ function setupChartHandlers() {
             }
 
             const nearestXPos = xPositions[nearestIdx];
+            const dataIdx = nearestIdx + meta.startIdx;
 
             const ctx = overlayCanvas.getContext('2d');
             ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
@@ -685,11 +710,13 @@ function setupChartHandlers() {
 
             const rows = [`<div style="color:#9ca3af; margin-bottom: 4px;">${fmtTime(xs[nearestIdx])}</div>`];
 
-            for (let j = 0; j < seriesData.legend.length; j++) {
+            const pointLegends = seriesData.legends[dataIdx] || [];
+            
+            for (let j = 0; j < pointLegends.length; j++) {
                 if (hiddenSeries[seriesName]?.[j]) continue;
                 
-                const legend = seriesData.legend[j];
-                const v = seriesData.values[nearestIdx + lastView.startIdx]?.[j] || 0;
+                const legend = pointLegends[j];
+                const v = seriesData.values[dataIdx]?.[j] || 0;
 
                 const valueRatio = (v - meta.minY) / (meta.maxY - meta.minY);
                 const yPos = meta.topPad + (meta.h - meta.topPad - meta.bottomPad) - 
@@ -732,6 +759,7 @@ function setupChartHandlers() {
         });
     });
 }
+
 function setupTimelineDrag() {
     const tl = document.getElementById('timeline');
     if (!tl) return;
