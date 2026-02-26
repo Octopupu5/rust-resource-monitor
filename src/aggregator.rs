@@ -30,18 +30,15 @@ impl Aggregator {
     }
 
     pub async fn run(self, cancel: CancellationToken) {
-        // Создаем отдельные структуры для сетей и дисков
         let mut networks = Networks::new_with_refreshed_list();
         let mut disks = Disks::new_with_refreshed_list();
         
-        // Создаем систему с нужными компонентами
         let mut sys = System::new_with_specifics(
             RefreshKind::everything()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::everything())
         );
 
-        // Инициализация для вычисления дельт - обновляем все сразу
         sys.refresh_all();
         // Для сетей и дисков refresh требует аргумент bool:
         // true - обновлять список интерфейсов/дисков
@@ -82,9 +79,7 @@ impl Aggregator {
                 continue;
             }
 
-            // Обновляем все данные
             sys.refresh_all();
-            // Обновляем сети и диски (false = только данные, без изменения списка)
             networks.refresh(false);
             disks.refresh(false);
 
@@ -96,7 +91,6 @@ impl Aggregator {
                 per_core.iter().sum::<f32>() / per_core.len() as f32
             };
             
-            // В sysinfo 0.38 load_average() - ассоциированная функция
             let la = System::load_average();
             println!("=== LOAD AVERAGE DEBUG ===");
             println!("la.one: {}", la.one);
@@ -104,7 +98,6 @@ impl Aggregator {
             println!("la.fifteen: {}", la.fifteen);
             println!("==========================");
 
-            // sysinfo возвращает KiB, конвертируем в байты
             let total_mem_bytes = sys.total_memory().saturating_mul(1024);
             let used_mem_bytes = sys.used_memory().saturating_mul(1024);
             let avail_mem_bytes = sys.available_memory().saturating_mul(1024);
@@ -177,7 +170,6 @@ impl Aggregator {
     }
 }
 
-// Функции теперь принимают Networks и Disks вместо System
 fn sum_network_rx(networks: &Networks) -> u64 {
     networks.iter().fold(0, |acc, (_, data)| acc + data.total_received())
 }
