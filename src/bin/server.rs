@@ -6,6 +6,7 @@ use resource_monitor::runtime;
 use resource_monitor::storage::MetricsBuffer;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -88,6 +89,7 @@ async fn main() {
                 tracing::warn!("Failed to send to RPC channel: {}", e);
             }
         }
+        info!("Converter stopped");
     });
 
     let console_handle = if args.console {
@@ -96,6 +98,7 @@ async fn main() {
         let interval = std::time::Duration::from_millis(args.interval_ms);
         Some(tokio::spawn(async move {
             console::run_console(console_buffer, interval, console_cancel).await;
+            info!("Console stopped");
         }))
     } else {
         None
@@ -103,15 +106,32 @@ async fn main() {
 
     runtime::shutdown_signal().await;
     info!("Shutdown signal received, stopping server...");
+
     cancel.cancel();
+    
 
-    // Ждем завершения всех задач
-    let _ = rpc_handle.await;
-    let _ = converter_handle.await;
-    if let Some(h) = console_handle {
-        let _ = h.await;
+    let shutdown_timeout = Duration::from_secs(3);
+
+    let rpc_result = tokio::time::timeout(shutdown_timeout, rpc_handle).await;
+    let converter_result = tokio::time::timeout(shutdown_timeout, converter_handle).await;
+    let agg_result = tokio::time::timeout(shutdown_timeout, agg_handle).await;
+
+    if let Some(handle) = console_handle {
+        let console_result = tokio::time::timeout(shutdown_timeout, handle).await;
+        if console_result.is_err() {
+            info!("Console shutdown timeout");
+        }
     }
-    let _ = agg_handle.await;
 
+    if rpc_result.is_err() {
+        info!("RPC server shutdown timeout");
+    }
+    if converter_result.is_err() {
+        info!("Converter shutdown timeout");
+    }
+    if agg_result.is_err() {
+        info!("Aggregator shutdown timeout");
+    }
+    
     info!("Server stopped");
 }
