@@ -15,6 +15,28 @@ let dragStartX = 0;
 let initialWindowStart = 0;
 let notificationTimeout = null;
 
+let isResizingLeft = false;
+let isResizingRight = false;
+let isMoving = false;
+let initialWindowMs = 0;
+
+const style = document.createElement('style');
+style.textContent = `
+    #timeline {
+        margin-bottom: 25px !important;
+        cursor: crosshair;
+    }
+    #range-label {
+        font-family: ui-monospace, monospace;
+        background: #1b2a4a;
+        padding: 4px 12px;
+        border-radius: 16px;
+        border: 1px solid #3b82f6;
+        font-size: 12px;
+    }
+`;
+document.head.appendChild(style);
+
 function clamp(x, lo, hi) {
     if (!Number.isFinite(x)) return lo;
     return Math.max(lo, Math.min(hi, x));
@@ -22,7 +44,15 @@ function clamp(x, lo, hi) {
 
 function fmtTime(ms) {
     const d = new Date(ms);
-    return d.toLocaleTimeString();
+    const hours = d.getHours().toString().padStart(2, '0');
+    const minutes = d.getMinutes().toString().padStart(2, '0');
+    const seconds = d.getSeconds().toString().padStart(2, '0');
+    return `${hours}:${minutes}:${seconds}`;
+}
+
+function fmtDateTime(ms) {
+    const d = new Date(ms);
+    return d.toLocaleString();
 }
 
 function formatValue(value, format) {
@@ -374,7 +404,8 @@ function drawTimeline() {
 
     const minX = data.xs[0];
     const maxX = data.xs[data.xs.length - 1];
-    const pad = 40;
+    const pad = 70;
+    const timeLabelArea = 35;
 
     if (data.series['cpu_total'] && data.series['cpu_total'].values.length > 0) {
         ctx.strokeStyle = 'rgba(196, 68, 68, 0.5)';
@@ -386,7 +417,7 @@ function drawTimeline() {
 
         for (let i = 0; i < data.xs.length; i += step) {
             const x = pad + ((data.xs[i] - minX) / (maxX - minX)) * (w - 2 * pad);
-            const y = h - 10 - ((data.series['cpu_total'].values[i][0] || 0) / 100) * (h - 20);
+            const y = 10 + ((data.series['cpu_total'].values[i][0] || 0) / 100) * (h - pad - 20);
 
             if (first) {
                 ctx.moveTo(x, y);
@@ -398,6 +429,12 @@ function drawTimeline() {
         ctx.stroke();
     }
 
+    ctx.strokeStyle = '#2a3550';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad, h - timeLabelArea);
+    ctx.lineTo(w - pad, h - timeLabelArea);
+    ctx.stroke();
     if (windowMs > 0 && windowStartMs) {
         const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (w - 2 * pad);
         const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (w - 2 * pad);
@@ -406,13 +443,13 @@ function drawTimeline() {
         const clampedX1 = Math.max(pad, Math.min(w - pad, x1));
 
         ctx.fillStyle = 'rgba(59, 130, 246, 0.2)';
-        ctx.fillRect(clampedX0, 0, clampedX1 - clampedX0, h);
+        ctx.fillRect(clampedX0, 0, clampedX1 - clampedX0, h - timeLabelArea);
 
         ctx.strokeStyle = '#3b82f6';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.moveTo(clampedX0, 0); ctx.lineTo(clampedX0, h);
-        ctx.moveTo(clampedX1, 0); ctx.lineTo(clampedX1, h);
+        ctx.moveTo(clampedX0, 0); ctx.lineTo(clampedX0, h - timeLabelArea);
+        ctx.moveTo(clampedX1, 0); ctx.lineTo(clampedX1, h - timeLabelArea);
         ctx.stroke();
     }
 
@@ -422,18 +459,101 @@ function drawTimeline() {
 
         if (xEnd > xStart) {
             ctx.fillStyle = 'rgba(236, 72, 153, 0.15)';
-            ctx.fillRect(xStart, 0, xEnd - xStart, h);
-
+            ctx.fillRect(xStart, 0, xEnd - xStart, h - timeLabelArea);
             ctx.strokeStyle = '#ec4899';
             ctx.lineWidth = 2;
             ctx.setLineDash([5, 5]);
             ctx.beginPath();
-            ctx.moveTo(xStart, 0); ctx.lineTo(xStart, h);
-            ctx.moveTo(xEnd, 0); ctx.lineTo(xEnd, h);
+            ctx.moveTo(xStart, 0); ctx.lineTo(xStart, h - timeLabelArea);
+            ctx.moveTo(xEnd, 0); ctx.lineTo(xEnd, h - timeLabelArea);
             ctx.stroke();
             ctx.setLineDash([]);
         }
     }
+
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillStyle = '#9ca3af';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'center';
+    
+    const timeLabels = 8;
+    for (let i = 0; i <= timeLabels; i++) {
+        const x = pad + (i / timeLabels) * (w - 2 * pad);
+        const time = minX + (i / timeLabels) * (maxX - minX);
+        const timeStr = fmtTime(time);
+
+        ctx.strokeStyle = '#2a3550';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x, h - timeLabelArea);
+        ctx.lineTo(x, h - timeLabelArea + 5);
+        ctx.stroke();
+        ctx.fillStyle = '#9ca3af';
+        ctx.fillText(timeStr, x, h - timeLabelArea + 8);
+    }
+
+    if (windowMs > 0 && windowStartMs) {
+        const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (w - 2 * pad);
+        const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (w - 2 * pad);
+
+        const clampedX0 = Math.max(pad, Math.min(w - pad, x0));
+        const clampedX1 = Math.max(pad, Math.min(w - pad, x1));
+        ctx.font = '9px ui-monospace, monospace';
+        ctx.fillStyle = '#3b82f6';
+        const startTimeStr = fmtTime(windowStartMs);
+        const endTimeStr = fmtTime(windowStartMs + windowMs);
+
+        const textWidth = ctx.measureText(startTimeStr).width;
+        if (clampedX0 + textWidth < clampedX1) {
+            ctx.fillText(startTimeStr, clampedX0, h - timeLabelArea + 20);
+            ctx.fillText(endTimeStr, clampedX1 - 40, h - timeLabelArea + 20);
+        }
+    }
+
+    if (selectionStart !== null && selectionEnd !== null && selectionEnd - selectionStart > 20) {
+        const xStart = Math.max(pad, Math.min(w - pad, Math.min(selectionStart, selectionEnd)));
+        const xEnd = Math.max(pad, Math.min(w - pad, Math.max(selectionStart, selectionEnd)));
+        const minX = data.xs[0];
+        const maxX = data.xs[data.xs.length - 1];
+
+        const timeStart = minX + ((xStart - pad) / (w - 2 * pad)) * (maxX - minX);
+        const timeEnd = minX + ((xEnd - pad) / (w - 2 * pad)) * (maxX - minX);
+
+        ctx.font = '9px ui-monospace, monospace';
+        ctx.fillStyle = '#ec4899';
+
+        const startTimeStr = fmtTime(timeStart);
+        const endTimeStr = fmtTime(timeEnd);
+
+        const textWidth = ctx.measureText(startTimeStr).width;
+        if (xStart + textWidth < xEnd) {
+            ctx.fillText(startTimeStr, xStart, h - timeLabelArea + 20);
+            ctx.fillText(endTimeStr, xEnd - 40, h - timeLabelArea + 20);
+        }
+    }
+
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+
+    ctx.fillStyle = '#3b82f6';
+    ctx.fillRect(10, 10, 12, 12);
+    ctx.fillStyle = '#9ca3af';
+    ctx.fillText('Current view', 28, 10);
+
+    ctx.fillStyle = '#ec4899';
+    ctx.fillRect(10, 30, 12, 12);
+    ctx.fillStyle = '#9ca3af';
+    ctx.fillText('Selection', 28, 30);
+
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#6b7280';
+    ctx.font = '9px ui-monospace, monospace';
+    ctx.fillText('Drag inside to move', w - 10, 10);
+    ctx.fillText('Drag edges to resize', w - 10, 25);
+    ctx.fillText('Drag outside to select', w - 10, 40);
+    ctx.fillText('Double-click → live', w - 10, 55);
+    ctx.fillText('Drag to end → auto-live', w - 10, 70);
 }
 
 function updateStatCards(snapshot) {
@@ -612,10 +732,14 @@ function setupTimelineDrag() {
 
     tl.addEventListener('mousedown', (e) => {
         if (data.xs.length < 2) return;
-
         const rect = tl.getBoundingClientRect();
         const x = e.clientX - rect.left;
-        const pad = 40;
+        const pad = 70;
+        const timeLabelArea = 35;
+
+        if (e.clientY > rect.bottom - timeLabelArea) {
+            return;
+        }
 
         const clampedX = Math.max(pad, Math.min(rect.width - pad, x));
 
@@ -624,14 +748,34 @@ function setupTimelineDrag() {
             const maxX = data.xs[data.xs.length - 1];
             const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
             const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
-            if (clampedX >= x0 - 5 && clampedX <= x1 + 5) {
+
+            const edgeSize = 8;
+            if (Math.abs(clampedX - x0) < edgeSize) {
                 isDraggingWindow = true;
+                isResizingLeft = true;
+                dragStartX = clampedX;
+                initialWindowStart = windowStartMs;
+                initialWindowMs = windowMs;
+                tl.style.cursor = 'ew-resize';
+                return;
+            } else if (Math.abs(clampedX - x1) < edgeSize) {
+                isDraggingWindow = true;
+                isResizingRight = true;
+                dragStartX = clampedX;
+                initialWindowStart = windowStartMs;
+                initialWindowMs = windowMs;
+                tl.style.cursor = 'ew-resize';
+                return;
+            } else if (clampedX >= x0 && clampedX <= x1) {
+                isDraggingWindow = true;
+                isMoving = true;
                 dragStartX = clampedX;
                 initialWindowStart = windowStartMs;
                 tl.style.cursor = 'grabbing';
                 return;
             }
         }
+
         isSelecting = true;
         selectionStart = clampedX;
         selectionEnd = clampedX;
@@ -639,7 +783,29 @@ function setupTimelineDrag() {
     });
 
     window.addEventListener('mousemove', (e) => {
-        if (!isDraggingWindow && !isSelecting) return;
+        if (!isDraggingWindow && !isSelecting) {
+            if (data.xs.length >= 2 && windowMs > 0 && windowStartMs) {
+                const rect = tl.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const pad = 40;
+                
+                const minX = data.xs[0];
+                const maxX = data.xs[data.xs.length - 1];
+                const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
+                const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
+                
+                const edgeSize = 8;
+                if (Math.abs(x - x0) < edgeSize || Math.abs(x - x1) < edgeSize) {
+                    tl.style.cursor = 'ew-resize';
+                } else if (x >= x0 && x <= x1) {
+                    tl.style.cursor = 'grab';
+                } else {
+                    tl.style.cursor = 'crosshair';
+                }
+            }
+            return;
+        }
+        
         if (data.xs.length < 2) return;
 
         const rect = tl.getBoundingClientRect();
@@ -648,24 +814,45 @@ function setupTimelineDrag() {
         const clampedX = Math.max(pad, Math.min(rect.width - pad, currentX));
 
         if (isDraggingWindow) {
-            const deltaX = clampedX - dragStartX;
-            const deltaRatio = deltaX / (rect.width - 2 * pad);
-
             const minX = data.xs[0];
             const maxX = data.xs[data.xs.length - 1];
             const timeRange = maxX - minX;
-
-            let newStart = initialWindowStart + deltaRatio * timeRange;
-            newStart = clamp(newStart, minX, maxX - (windowMs || 60000));
-
-            windowStartMs = newStart;
-            pausedEndTs = windowStartMs + (windowMs || 60000);
-
-            const maxPossibleEnd = maxX;
-            followLive = (pausedEndTs >= maxPossibleEnd - 1000);
-
+            
+            if (isResizingLeft) {
+                const deltaX = dragStartX - clampedX;
+                const deltaRatio = deltaX / (rect.width - 2 * pad);
+                const deltaTime = deltaRatio * timeRange;
+                
+                let newStart = initialWindowStart - deltaTime;
+                let newEnd = initialWindowStart + initialWindowMs;
+                
+                newStart = clamp(newStart, minX, newEnd - 60000);
+                windowMs = newEnd - newStart;
+                windowStartMs = newStart;
+            } else if (isResizingRight) {
+                const deltaX = clampedX - dragStartX;
+                const deltaRatio = deltaX / (rect.width - 2 * pad);
+                const deltaTime = deltaRatio * timeRange;
+                
+                let newEnd = initialWindowStart + initialWindowMs + deltaTime;
+                newEnd = clamp(newEnd, initialWindowStart + 60000, maxX);
+                windowMs = newEnd - initialWindowStart;
+                windowStartMs = initialWindowStart;
+            } else if (isMoving) {
+                const deltaX = clampedX - dragStartX;
+                const deltaRatio = deltaX / (rect.width - 2 * pad);
+                
+                let newStart = initialWindowStart + deltaRatio * timeRange;
+                newStart = clamp(newStart, minX, maxX - windowMs);
+                windowStartMs = newStart;
+            }
+            
+            pausedEndTs = windowStartMs + windowMs;
+            followLive = (pausedEndTs >= maxX - 1000);
+            
             updateEndSlider();
             drawAllCharts();
+            
         } else if (isSelecting && selectionStart !== null) {
             selectionEnd = clampedX;
             drawTimeline();
@@ -714,7 +901,6 @@ function setupTimelineDrag() {
                 drawAllCharts();
                 showNotification('Switched to live mode');
             } else if (xEnd - xStart > 5) {
-
                 const minX = data.xs[0];
                 const maxX = data.xs[data.xs.length - 1];
 
@@ -770,6 +956,9 @@ function setupTimelineDrag() {
 
         isDraggingWindow = false;
         isSelecting = false;
+        isResizingLeft = false;
+        isResizingRight = false;
+        isMoving = false;
         selectionStart = null;
         selectionEnd = null;
         tl.style.cursor = 'default';
@@ -839,10 +1028,24 @@ function showNotification(message, duration = 3000) {
 
 function updateRangeLabel(view) {
     const label = document.getElementById('range-label');
-    if (windowMs === 0) {
-        label.textContent = `All data: ${fmtTime(view.startTs)} - ${fmtTime(view.endTs)}`;
+    const duration = (view.endTs - view.startTs) / 1000;
+    const hours = Math.floor(duration / 3600);
+    const minutes = Math.floor((duration % 3600) / 60);
+    const seconds = Math.floor(duration % 60);
+    
+    let durationStr = '';
+    if (hours > 0) {
+        durationStr = `${hours}h ${minutes}m ${seconds}s`;
+    } else if (minutes > 0) {
+        durationStr = `${minutes}m ${seconds}s`;
     } else {
-        label.textContent = `${fmtTime(view.startTs)} - ${fmtTime(view.endTs)} (${Math.round(windowMs/60000)}m)`;
+        durationStr = `${seconds}s`;
+    }
+    
+    if (windowMs === 0) {
+        label.textContent = `All data: ${fmtTime(view.startTs)} - ${fmtTime(view.endTs)} (${durationStr})`;
+    } else {
+        label.textContent = `${fmtTime(view.startTs)} - ${fmtTime(view.endTs)} (${durationStr})`;
     }
 }
 
