@@ -3,9 +3,7 @@ use crate::metrics::{
     now_timestamp_ms, CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics,
 };
 use std::time::{Duration, Instant};
-use sysinfo::{
-    CpuRefreshKind, MemoryRefreshKind, Networks, Disks, RefreshKind, System,
-};
+use sysinfo::{CpuRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind, System};
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -32,11 +30,10 @@ impl Aggregator {
     pub async fn run(self, cancel: CancellationToken) {
         let mut networks = Networks::new_with_refreshed_list();
         let mut disks = Disks::new_with_refreshed_list();
-        
         let mut sys = System::new_with_specifics(
             RefreshKind::everything()
                 .with_cpu(CpuRefreshKind::everything())
-                .with_memory(MemoryRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
         );
 
         sys.refresh_all();
@@ -58,7 +55,7 @@ impl Aggregator {
         let mut ticker = tokio::time::interval(self.config.interval);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut is_first = true;
-        
+
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -90,7 +87,7 @@ impl Aggregator {
             } else {
                 per_core.iter().sum::<f32>() / per_core.len() as f32
             };
-            
+
             let la = System::load_average();
             println!("=== LOAD AVERAGE DEBUG ===");
             println!("la.one: {}", la.one);
@@ -171,11 +168,15 @@ impl Aggregator {
 }
 
 fn sum_network_rx(networks: &Networks) -> u64 {
-    networks.iter().fold(0, |acc, (_, data)| acc + data.total_received())
+    networks
+        .iter()
+        .fold(0, |acc, (_, data)| acc + data.total_received())
 }
 
 fn sum_network_tx(networks: &Networks) -> u64 {
-    networks.iter().fold(0, |acc, (_, data)| acc + data.total_transmitted())
+    networks
+        .iter()
+        .fold(0, |acc, (_, data)| acc + data.total_transmitted())
 }
 
 fn sum_disk_total(disks: &Disks) -> u64 {
@@ -183,5 +184,7 @@ fn sum_disk_total(disks: &Disks) -> u64 {
 }
 
 fn sum_disk_avail(disks: &Disks) -> u64 {
-    disks.iter().fold(0, |acc, disk| acc + disk.available_space())
+    disks
+        .iter()
+        .fold(0, |acc, disk| acc + disk.available_space())
 }
