@@ -1,6 +1,7 @@
 use clap::Parser;
 use resource_monitor::aggregator::{Aggregator, AggregatorConfig};
 use resource_monitor::console;
+use resource_monitor::metrics::{MetricsSnapshot, RpcMetricsSnapshot};
 use resource_monitor::runtime;
 use resource_monitor::storage::MetricsBuffer;
 use std::net::SocketAddr;
@@ -43,12 +44,17 @@ async fn main() {
     let buffer = Arc::new(MetricsBuffer::new(args.history));
     let cancel = CancellationToken::new();
 
-    let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(256);
+    // Создаем канал для RPC (RpcMetricsSnapshot)
+    let (rpc_stream_tx, _) = tokio::sync::broadcast::channel::<RpcMetricsSnapshot>(256);
 
-    // Keep storage+stream subscriber alive.
-    let _storage_activity = resource_monitor::bus::register_storage_and_stream_subscriber(
+    // Создаем канал для внутреннего использования (MetricsSnapshot)
+    let (internal_stream_tx, mut internal_stream_rx) =
+        tokio::sync::broadcast::channel::<MetricsSnapshot>(256);
+
+    // Подписываемся на события и сохраняем в буфер, а также отправляем во внутренний канал
+    let _storage_activity = resource_monitor::bus::register_storage_subscriber_with_channel(
         buffer.clone(),
-        stream_tx.clone(),
+        internal_stream_tx.clone(),
     );
 
     let agg = Aggregator::new(AggregatorConfig::new(std::time::Duration::from_millis(
@@ -59,11 +65,29 @@ async fn main() {
 
     let rpc_cancel = cancel.clone();
     let rpc_buffer = buffer.clone();
-    let rpc_stream_tx = stream_tx.clone();
     let rpc_addr = args.rpc_addr;
+
+    // Клонируем для RPC сервера
+    let rpc_stream_tx_for_server = rpc_stream_tx.clone();
     let rpc_handle = tokio::spawn(async move {
-        resource_monitor::rpc::run_rpc_server(rpc_buffer, rpc_stream_tx, rpc_addr, rpc_cancel)
-            .await;
+        resource_monitor::rpc::run_rpc_server(
+            rpc_buffer,
+            rpc_stream_tx_for_server,
+            rpc_addr,
+            rpc_cancel,
+        )
+        .await;
+    });
+
+    // Конвертер из внутреннего формата в RPC формат
+    let rpc_stream_tx_for_converter = rpc_stream_tx.clone();
+    let converter_handle = tokio::spawn(async move {
+        while let Ok(snapshot) = internal_stream_rx.recv().await {
+            let rpc_snapshot = snapshot.to_rpc_format();
+            if let Err(e) = rpc_stream_tx_for_converter.send(rpc_snapshot) {
+                tracing::warn!("Failed to send to RPC channel: {}", e);
+            }
+        }
     });
 
     let console_handle = if args.console {
@@ -78,11 +102,16 @@ async fn main() {
     };
 
     runtime::shutdown_signal().await;
+    info!("Shutdown signal received, stopping server...");
     cancel.cancel();
 
+    // Ждем завершения всех задач
     let _ = rpc_handle.await;
+    let _ = converter_handle.await;
     if let Some(h) = console_handle {
         let _ = h.await;
     }
     let _ = agg_handle.await;
+
+    info!("Server stopped");
 }

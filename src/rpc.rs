@@ -1,4 +1,4 @@
-use crate::metrics::MetricsSnapshot;
+use crate::metrics::RpcMetricsSnapshot;
 use crate::storage::MetricsBuffer;
 use futures::StreamExt;
 use std::net::SocketAddr;
@@ -15,26 +15,29 @@ use tracing::{error, info, warn};
 
 #[tarpc::service]
 pub trait MetricsRpc {
-    async fn latest() -> Option<MetricsSnapshot>;
-    async fn history(limit: Option<usize>, since_ms: Option<u64>) -> Vec<MetricsSnapshot>;
-    async fn next_after(since_ms: u64, timeout_ms: u64) -> Option<MetricsSnapshot>;
+    async fn latest() -> Option<RpcMetricsSnapshot>;
+    async fn history(limit: Option<usize>, since_ms: Option<u64>) -> Vec<RpcMetricsSnapshot>;
+    async fn next_after(since_ms: u64, timeout_ms: u64) -> Option<RpcMetricsSnapshot>;
 }
 
 #[derive(Clone)]
 pub struct MetricsRpcServer {
     buffer: Arc<MetricsBuffer>,
-    stream_tx: broadcast::Sender<MetricsSnapshot>,
+    stream_tx: broadcast::Sender<RpcMetricsSnapshot>,
 }
 
 impl MetricsRpcServer {
-    pub fn new(buffer: Arc<MetricsBuffer>, stream_tx: broadcast::Sender<MetricsSnapshot>) -> Self {
+    pub fn new(
+        buffer: Arc<MetricsBuffer>,
+        stream_tx: broadcast::Sender<RpcMetricsSnapshot>,
+    ) -> Self {
         Self { buffer, stream_tx }
     }
 }
 
 impl MetricsRpc for MetricsRpcServer {
-    async fn latest(self, _ctx: context::Context) -> Option<MetricsSnapshot> {
-        self.buffer.latest()
+    async fn latest(self, _ctx: context::Context) -> Option<RpcMetricsSnapshot> {
+        self.buffer.latest().map(|snap| snap.to_rpc_format())
     }
 
     async fn history(
@@ -42,17 +45,23 @@ impl MetricsRpc for MetricsRpcServer {
         _ctx: context::Context,
         limit: Option<usize>,
         since_ms: Option<u64>,
-    ) -> Vec<MetricsSnapshot> {
-        let mut v = self.buffer.history(None);
+    ) -> Vec<RpcMetricsSnapshot> {
+        let mut snapshots = self.buffer.history(None);
+
         if let Some(since_ms) = since_ms {
-            v.retain(|s| s.timestamp_ms >= since_ms as u128);
+            snapshots.retain(|s| s.timestamp_ms >= since_ms as u128);
         }
+
+        let mut rpc_snapshots: Vec<RpcMetricsSnapshot> =
+            snapshots.into_iter().map(|s| s.to_rpc_format()).collect();
+
         if let Some(limit) = limit {
-            let len = v.len();
+            let len = rpc_snapshots.len();
             let take = limit.min(len);
-            v = v.into_iter().skip(len - take).collect();
+            rpc_snapshots = rpc_snapshots.into_iter().skip(len - take).collect();
         }
-        v
+
+        rpc_snapshots
     }
 
     async fn next_after(
@@ -60,13 +69,14 @@ impl MetricsRpc for MetricsRpcServer {
         ctx: context::Context,
         since_ms: u64,
         timeout_ms: u64,
-    ) -> Option<MetricsSnapshot> {
+    ) -> Option<RpcMetricsSnapshot> {
         let deadline = ctx.deadline;
         let now = std::time::SystemTime::now();
         let until_deadline = match deadline.duration_since(now) {
             Ok(d) => d,
             Err(_) => Duration::ZERO,
         };
+
         if until_deadline.is_zero() {
             return None;
         }
@@ -77,10 +87,9 @@ impl MetricsRpc for MetricsRpcServer {
             return None;
         }
 
-        // Fast path: if we already have a newer snapshot in memory, return it immediately.
         if let Some(latest) = self.buffer.latest() {
             if latest.timestamp_ms > since_ms as u128 {
-                return Some(latest);
+                return Some(latest.to_rpc_format());
             }
         }
 
@@ -94,7 +103,6 @@ impl MetricsRpc for MetricsRpcServer {
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // Client fell behind; keep waiting for a new snapshot.
                         continue;
                     }
                     Err(broadcast::error::RecvError::Closed) => {
@@ -110,7 +118,7 @@ impl MetricsRpc for MetricsRpcServer {
 
 pub async fn run_rpc_server(
     buffer: Arc<MetricsBuffer>,
-    stream_tx: broadcast::Sender<MetricsSnapshot>,
+    stream_tx: broadcast::Sender<RpcMetricsSnapshot>,
     addr: SocketAddr,
     cancel: CancellationToken,
 ) {
@@ -130,6 +138,7 @@ pub async fn run_rpc_server(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
+                info!("RPC server shutting down");
                 break;
             }
             next = incoming.next() => {
@@ -160,7 +169,7 @@ pub async fn run_rpc_client_poller(
     addr: SocketAddr,
     interval: Duration,
     cancel: CancellationToken,
-    on_snapshot: impl Fn(MetricsSnapshot) + Send + Sync + 'static,
+    on_snapshot: impl Fn(RpcMetricsSnapshot) + Send + Sync + 'static,
 ) {
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -171,6 +180,7 @@ pub async fn run_rpc_client_poller(
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
+                info!("RPC client poller shutting down");
                 break;
             }
             _ = ticker.tick() => {}
@@ -213,7 +223,7 @@ pub async fn run_rpc_client_poller(
 pub async fn run_rpc_client_streamer(
     addr: SocketAddr,
     cancel: CancellationToken,
-    on_snapshot: impl Fn(MetricsSnapshot) + Send + Sync + 'static,
+    on_snapshot: impl Fn(RpcMetricsSnapshot) + Send + Sync + 'static,
 ) {
     let on_snapshot = Arc::new(on_snapshot);
     let mut client: Option<MetricsRpcClient> = None;
@@ -224,6 +234,7 @@ pub async fn run_rpc_client_streamer(
             let connect_fut = tarpc::serde_transport::tcp::connect(addr, Json::default);
             tokio::select! {
                 _ = cancel.cancelled() => {
+                    info!("RPC client streamer shutting down");
                     break;
                 }
                 res = connect_fut => {
@@ -251,26 +262,22 @@ pub async fn run_rpc_client_streamer(
             continue;
         };
         let mut ctx = context::current();
-        // Ensure the request deadline is longer than our long-poll timeout.
         let long_poll_ms: u64 = 30_000;
         ctx.deadline = std::time::SystemTime::now() + Duration::from_millis(long_poll_ms + 1_000);
 
         let req_fut = c.next_after(ctx, since_ms, long_poll_ms);
         tokio::select! {
             _ = cancel.cancelled() => {
-                // Dropping the in-flight request triggers tarpc cancellation.
+                info!("RPC client streamer cancelled");
                 break;
             }
             res = req_fut => {
                 match res {
                     Ok(Some(snap)) => {
-                        // Keep moving forward even if remote clock is weird.
-                        let ts = snap.timestamp_ms;
-                        since_ms = ts.try_into().unwrap_or(u64::MAX);
+                        since_ms = snap.timestamp_ms.try_into().unwrap_or(u64::MAX);
                         (on_snapshot)(snap);
                     }
                     Ok(None) => {
-                        // Timeout/no data; keep the connection and try again.
                         continue;
                     }
                     Err(e) => {

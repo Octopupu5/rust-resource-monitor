@@ -2,6 +2,36 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RpcMetricsSnapshot {
+    pub timestamp_ms: u128,
+    pub data: Vec<MetricSeries>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetricSeries {
+    pub name: String,
+    pub beautiful_name: String,
+    pub series: Vec<f32>,
+    pub legend: Vec<MetricLegend>,
+    pub format: DisplayFormat,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MetricLegend {
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", content = "params")]
+pub enum DisplayFormat {
+    Percentage { decimals: usize },
+    Bytes { suffix: String },
+    Float { decimals: usize },
+    Integer,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CpuMetrics {
     pub total_usage_pct: f32,
     pub per_core_usage_pct: Vec<f32>,
@@ -29,14 +59,12 @@ pub struct NetworkMetrics {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiskMetrics {
-    /// Sum of total space across all disks (bytes).
     pub total_bytes: u64,
-    /// Sum of available space across all disks (bytes).
     pub available_bytes: u64,
-    /// Overall used percentage: (total - available) / total * 100.
     pub used_pct: f32,
 }
 
+// Внутренняя структура для хранения в буфере
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub timestamp_ms: u128,
@@ -44,6 +72,141 @@ pub struct MetricsSnapshot {
     pub memory: MemoryMetrics,
     pub network: NetworkMetrics,
     pub disk: DiskMetrics,
+}
+
+impl MetricsSnapshot {
+    // Преобразование во внешний формат для RPC
+    pub fn to_rpc_format(&self) -> RpcMetricsSnapshot {
+        let total_mem_bytes = self.memory.total_bytes;
+        let used_mem_bytes = self.memory.used_bytes;
+        let mem_used_pct = if total_mem_bytes > 0 {
+            (used_mem_bytes as f32 / total_mem_bytes as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        let swap_total = self.memory.swap_total_bytes;
+        let swap_used = self.memory.swap_used_bytes;
+        let swap_used_pct = if swap_total > 0 {
+            (swap_used as f32 / swap_total as f32) * 100.0
+        } else {
+            0.0
+        };
+
+        RpcMetricsSnapshot {
+            timestamp_ms: self.timestamp_ms,
+            data: vec![
+                // CPU total
+                MetricSeries {
+                    name: "cpu_total".to_string(),
+                    beautiful_name: "CPU total (%)".to_string(),
+                    series: vec![self.cpu.total_usage_pct],
+                    legend: vec![MetricLegend {
+                        name: "CPU".to_string(),
+                        color: "#c44".to_string(),
+                    }],
+                    format: DisplayFormat::Percentage { decimals: 1 },
+                },
+                // CPU per core
+                MetricSeries {
+                    name: "cpu_cores".to_string(),
+                    beautiful_name: "CPU per core (%)".to_string(),
+                    series: self.cpu.per_core_usage_pct.clone(),
+                    legend: self
+                        .cpu
+                        .per_core_usage_pct
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| {
+                            let hue = (i as f32 / self.cpu.per_core_usage_pct.len() as f32) * 360.0;
+                            MetricLegend {
+                                name: format!("C{}", i),
+                                color: format!("hsl({}, 80%, 60%)", hue),
+                            }
+                        })
+                        .collect(),
+                    format: DisplayFormat::Percentage { decimals: 1 },
+                },
+                // Load average
+                MetricSeries {
+                    name: "load_avg".to_string(),
+                    beautiful_name: "CPU Load Average".to_string(),
+                    series: vec![
+                        self.cpu.load_avg_1,
+                        self.cpu.load_avg_5,
+                        self.cpu.load_avg_15,
+                    ],
+                    legend: vec![
+                        MetricLegend {
+                            name: "1m".to_string(),
+                            color: "#e879f9".to_string(),
+                        },
+                        MetricLegend {
+                            name: "5m".to_string(),
+                            color: "#a78bfa".to_string(),
+                        },
+                        MetricLegend {
+                            name: "15m".to_string(),
+                            color: "#60a5fa".to_string(),
+                        },
+                    ],
+                    format: DisplayFormat::Float { decimals: 2 },
+                },
+                // Memory used
+                MetricSeries {
+                    name: "memory".to_string(),
+                    beautiful_name: "Memory used (%)".to_string(),
+                    series: vec![mem_used_pct],
+                    legend: vec![MetricLegend {
+                        name: "Memory".to_string(),
+                        color: "#f59e0b".to_string(),
+                    }],
+                    format: DisplayFormat::Percentage { decimals: 1 },
+                },
+                // Swap used
+                MetricSeries {
+                    name: "swap".to_string(),
+                    beautiful_name: "Swap used (%)".to_string(),
+                    series: vec![swap_used_pct],
+                    legend: vec![MetricLegend {
+                        name: "Swap".to_string(),
+                        color: "#818cf8".to_string(),
+                    }],
+                    format: DisplayFormat::Percentage { decimals: 1 },
+                },
+                // Network RX/TX
+                MetricSeries {
+                    name: "network".to_string(),
+                    beautiful_name: "Network".to_string(),
+                    series: vec![self.network.rx_bytes_per_sec, self.network.tx_bytes_per_sec],
+                    legend: vec![
+                        MetricLegend {
+                            name: "RX".to_string(),
+                            color: "#0b6".to_string(),
+                        },
+                        MetricLegend {
+                            name: "TX".to_string(),
+                            color: "#06b".to_string(),
+                        },
+                    ],
+                    format: DisplayFormat::Bytes {
+                        suffix: "B/s".to_string(),
+                    },
+                },
+                // Disk used
+                MetricSeries {
+                    name: "disk".to_string(),
+                    beautiful_name: "Disk used (%)".to_string(),
+                    series: vec![self.disk.used_pct],
+                    legend: vec![MetricLegend {
+                        name: "Disk".to_string(),
+                        color: "#34d399".to_string(),
+                    }],
+                    format: DisplayFormat::Percentage { decimals: 1 },
+                },
+            ],
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,7 +218,6 @@ pub fn now_timestamp_ms() -> u128 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(dur) => dur.as_millis(),
         Err(err) => {
-            // System clock is before UNIX_EPOCH; return 0 and let caller decide what to do.
             tracing::error!("SystemTime before UNIX_EPOCH: {}", err);
             0
         }

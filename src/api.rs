@@ -1,4 +1,4 @@
-use crate::metrics::{ErrorResponse, MetricsSnapshot};
+use crate::metrics::{ErrorResponse, RpcMetricsSnapshot};
 use crate::storage::MetricsBuffer;
 use crate::web;
 use axum::extract::State;
@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub struct AppState {
     pub buffer: Arc<MetricsBuffer>,
-    pub stream_tx: broadcast::Sender<MetricsSnapshot>,
+    pub stream_tx: broadcast::Sender<RpcMetricsSnapshot>,
     pub shutdown: CancellationToken,
 }
 
@@ -55,7 +55,7 @@ async fn index() -> impl IntoResponse {
 
 async fn get_latest(State(state): State<AppState>) -> impl IntoResponse {
     match state.buffer.latest() {
-        Some(snap) => (StatusCode::OK, Json(snap)).into_response(),
+        Some(snap) => (StatusCode::OK, Json(snap.to_rpc_format())).into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -74,7 +74,7 @@ async fn get_history(
     let since_ms = query.since_ms;
     let until_ms = query.until_ms;
 
-    let history: Vec<MetricsSnapshot> = state
+    let history: Vec<RpcMetricsSnapshot> = state
         .buffer
         .history(None)
         .into_iter()
@@ -88,6 +88,7 @@ async fn get_history(
                 .map(|ts| s.timestamp_ms <= ts as u128)
                 .unwrap_or(true)
         })
+        .map(|s| s.to_rpc_format())
         .collect();
 
     let history = if let Some(limit) = limit {

@@ -1,6 +1,7 @@
 use clap::{Parser, ValueEnum};
 use resource_monitor::api::{router, AppState};
 use resource_monitor::console;
+use resource_monitor::metrics::RpcMetricsSnapshot;
 use resource_monitor::runtime;
 use resource_monitor::storage::MetricsBuffer;
 use std::net::{IpAddr, SocketAddr};
@@ -55,19 +56,17 @@ async fn main() {
     let buffer = Arc::new(MetricsBuffer::new(args.history));
     let cancel = CancellationToken::new();
 
-    let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(256);
-
-    // Keep storage+stream subscriber alive. RPC snapshots are published into nuts.
-    let _storage_activity = resource_monitor::bus::register_storage_and_stream_subscriber(
-        buffer.clone(),
-        stream_tx.clone(),
-    );
+    // Для HTTP API используем RpcMetricsSnapshot
+    let (api_stream_tx, _) = tokio::sync::broadcast::channel::<RpcMetricsSnapshot>(256);
 
     let rpc_cancel = cancel.clone();
     let rpc_addr = args.rpc_addr;
+    let api_stream_tx_clone = api_stream_tx.clone();
+
     let rpc_handle = tokio::spawn(async move {
-        resource_monitor::rpc::run_rpc_client_streamer(rpc_addr, rpc_cancel, |snap| {
-            resource_monitor::bus::publish_snapshot(snap)
+        resource_monitor::rpc::run_rpc_client_streamer(rpc_addr, rpc_cancel, move |snap| {
+            // Просто передаем snapshot в API канал, никакой магии
+            let _ = api_stream_tx_clone.send(snap);
         })
         .await;
     });
@@ -92,7 +91,7 @@ async fn main() {
         Mode::Web | Mode::Both => {
             let state = AppState {
                 buffer: buffer.clone(),
-                stream_tx: stream_tx.clone(),
+                stream_tx: api_stream_tx.clone(),
                 shutdown: cancel.clone(),
             };
             let app = router(state);
@@ -123,21 +122,21 @@ async fn main() {
     };
 
     runtime::shutdown_signal().await;
-    info!("Shutdown signal received");
+    info!("Shutdown signal received, stopping client...");
     cancel.cancel();
 
+    // Graceful shutdown для всех компонентов
     if let Some(h) = web_handle {
         let mut h = h;
         if tokio::time::timeout(Duration::from_secs(2), &mut h)
             .await
             .is_err()
         {
-            // Force-exit if a long-lived connection prevents graceful shutdown.
-            // This is a safety net; the SSE handler also stops on cancellation.
             h.abort();
             let _ = h.await;
         }
     }
+
     if let Some(h) = console_handle {
         let mut h = h;
         if tokio::time::timeout(Duration::from_secs(2), &mut h)
@@ -148,6 +147,7 @@ async fn main() {
             let _ = h.await;
         }
     }
+
     let mut rpc_handle = rpc_handle;
     if tokio::time::timeout(Duration::from_secs(2), &mut rpc_handle)
         .await
@@ -156,4 +156,6 @@ async fn main() {
         rpc_handle.abort();
         let _ = rpc_handle.await;
     }
+
+    info!("Client stopped");
 }

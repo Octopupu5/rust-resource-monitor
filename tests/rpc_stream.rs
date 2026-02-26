@@ -1,6 +1,6 @@
 use futures::StreamExt;
 use resource_monitor::metrics::{
-    CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics,
+    CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics, RpcMetricsSnapshot,
 };
 use resource_monitor::rpc::{MetricsRpc, MetricsRpcClient, MetricsRpcServer};
 use resource_monitor::storage::MetricsBuffer;
@@ -13,7 +13,7 @@ use tokio::sync::broadcast;
 #[tokio::test]
 async fn next_after_returns_next_snapshot() {
     let buffer = Arc::new(MetricsBuffer::new(10));
-    let (stream_tx, _stream_rx) = broadcast::channel(8);
+    let (stream_tx, _stream_rx) = broadcast::channel::<RpcMetricsSnapshot>(8);
 
     let server_impl = MetricsRpcServer::new(buffer.clone(), stream_tx.clone());
     let (client_transport, server_transport) = tarpc::transport::channel::unbounded();
@@ -32,7 +32,8 @@ async fn next_after_returns_next_snapshot() {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let snap = sample_snapshot(2000);
         buffer.push(snap.clone());
-        let _ = stream_tx.send(snap);
+        // Отправляем в RPC формате
+        let _ = stream_tx.send(snap.to_rpc_format());
     });
 
     let mut ctx = context::current();
