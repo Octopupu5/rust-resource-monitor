@@ -108,7 +108,6 @@ async fn main() {
     info!("Shutdown signal received, stopping server...");
 
     cancel.cancel();
-    
 
     let shutdown_timeout = Duration::from_secs(3);
 
@@ -132,6 +131,6 @@ async fn main() {
     if agg_result.is_err() {
         info!("Aggregator shutdown timeout");
     }
-    
+
     info!("Server stopped");
 }
