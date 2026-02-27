@@ -38,10 +38,14 @@ pub fn render_index() -> String {
     <div class="controls">
       <span class="label" id="range-label">Last 3 minutes</span>
     </div>
+    <div class="controls widget-menu-toggle">
+      <button id="widget-menu-btn" type="button">Widgets</button>
+      <div id="widget-menu" class="widget-menu"></div>
+    </div>
   </div>
 
-  <div class="panel" style="margin-bottom:16px;">
-    <div class="controls" style="gap: 12px;">
+  <div style="margin-bottom:16px;">
+    <div class="controls" style="gap: 12px; margin-bottom: 8px;">
       <span class="label">Window (minutes)</span>
       <input id="win-slider" type="range" min="1" max="60" value="3" step="1" style="width: 240px;">
       <span class="label" id="win-slider-label">3m</span>
@@ -51,12 +55,18 @@ pub fn render_index() -> String {
       <span class="label" id="end-slider-label">live</span>
       <button id="live-btn" type="button">Live</button>
     </div>
-    <div style="margin-top:10px;">
-      <canvas id="timeline" width="1120" height="64" style="width:100%; height:64px;"></canvas>
-      <div class="controls" style="justify-content: space-between; margin-top: 8px; width: 100%;">
-        <span class="label" id="brush-label">Drag on the timeline to select a time range</span>
-        <span class="label">Hover charts to see exact values</span>
-      </div>
+    <canvas id="timeline" width="1120" height="80" style="width:100%; height:80px; border: none; border-radius: 0;"></canvas>
+    <div style="display: flex; justify-content: center; align-items: center; gap: 24px; margin-top: 4px; flex-wrap: wrap;">
+      <span style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #9ca3af; font-family: ui-monospace, monospace;">
+        <span style="width: 10px; height: 10px; background: #3b82f6; border-radius: 2px; display: inline-block;"></span> Current view
+      </span>
+      <span style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: #9ca3af; font-family: ui-monospace, monospace;">
+        <span style="width: 10px; height: 10px; background: #ec4899; border-radius: 2px; display: inline-block;"></span> Selection
+      </span>
+      <span style="font-size: 11px; color: #6b7280; font-family: ui-monospace, monospace;">|</span>
+      <span class="label" id="brush-label" style="font-size: 11px;">Drag outside to select · Drag inside to move · Drag edges to resize · Double-click &rarr; live</span>
+      <span style="font-size: 11px; color: #6b7280; font-family: ui-monospace, monospace;">|</span>
+      <span class="label" style="font-size: 11px;">Hover charts to see exact values</span>
     </div>
   </div>
 

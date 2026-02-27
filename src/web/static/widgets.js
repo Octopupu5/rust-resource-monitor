@@ -7,6 +7,9 @@ const tooltip = document.getElementById('tooltip');
 let lastView = null;
 let hiddenSeries = {};
 
+let widgetOrder = JSON.parse(localStorage.getItem('rm_widgetOrder') || '[]');
+let hiddenWidgets = JSON.parse(localStorage.getItem('rm_hiddenWidgets') || '{}');
+
 let selectionStart = null;
 let selectionEnd = null;
 let isSelecting = false;
@@ -88,22 +91,79 @@ function byteScale(maxY) {
     return { div: 1, unit: 'B/s' }
 }
 
+function getOrderedSeries(snapshotData) {
+    const names = snapshotData.map(s => s.name);
+    if (widgetOrder.length === 0) {
+        widgetOrder = [...names];
+        saveWidgetPrefs();
+    } else {
+        names.forEach(n => { if (!widgetOrder.includes(n)) widgetOrder.push(n); });
+        widgetOrder = widgetOrder.filter(n => names.includes(n));
+    }
+    const byName = {};
+    snapshotData.forEach(s => { byName[s.name] = s; });
+    return widgetOrder.map(n => byName[n]).filter(Boolean);
+}
+
+function saveWidgetPrefs() {
+    localStorage.setItem('rm_widgetOrder', JSON.stringify(widgetOrder));
+    localStorage.setItem('rm_hiddenWidgets', JSON.stringify(hiddenWidgets));
+    updateWidgetMenu();
+}
+
 function createChartsFromSnapshot(snapshot) {
     const container = document.getElementById('charts-container');
     if (!container) return;
 
     container.innerHTML = '';
+    const ordered = getOrderedSeries(snapshot.data);
 
-    snapshot.data.forEach(series => {
+    ordered.forEach(series => {
         if (series.series.length === 0) return;
 
         const panel = document.createElement('div');
-        panel.className = 'panel';
+        panel.className = 'panel widget-panel';
         panel.setAttribute('data-series-name', series.name);
+        panel.draggable = true;
+        if (hiddenWidgets[series.name]) panel.style.display = 'none';
+
+        const header = document.createElement('div');
+        header.className = 'widget-header';
+
+        const dragHandle = document.createElement('span');
+        dragHandle.className = 'drag-handle';
+        dragHandle.textContent = '\u2630';
+        dragHandle.title = 'Drag to reorder';
 
         const title = document.createElement('h3');
+        title.style.cssText = 'margin: 0; flex: 1;';
         title.textContent = series.beautiful_name || series.name;
-        panel.appendChild(title);
+
+        const fullscreenBtn = document.createElement('button');
+        fullscreenBtn.className = 'widget-header-btn';
+        fullscreenBtn.innerHTML = '&#x26F6;';
+        fullscreenBtn.title = 'Fullscreen';
+        fullscreenBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openFullscreen(series.name);
+        });
+
+        const hideBtn = document.createElement('button');
+        hideBtn.className = 'widget-hide-btn';
+        hideBtn.textContent = '\u00D7';
+        hideBtn.title = 'Hide widget';
+        hideBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            hiddenWidgets[series.name] = true;
+            panel.style.display = 'none';
+            saveWidgetPrefs();
+        });
+
+        header.appendChild(dragHandle);
+        header.appendChild(title);
+        header.appendChild(fullscreenBtn);
+        header.appendChild(hideBtn);
+        panel.appendChild(header);
 
         const chartDiv = document.createElement('div');
         chartDiv.className = 'chart';
@@ -148,10 +208,265 @@ function createChartsFromSnapshot(snapshot) {
             
             panel.appendChild(legend);
         }
+
+        panel.addEventListener('dragstart', (e) => {
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', series.name);
+            panel.classList.add('dragging');
+        });
+        panel.addEventListener('dragend', () => {
+            panel.classList.remove('dragging');
+            document.querySelectorAll('.widget-panel.drag-over').forEach(el => el.classList.remove('drag-over'));
+        });
+        panel.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            panel.classList.add('drag-over');
+        });
+        panel.addEventListener('dragleave', () => {
+            panel.classList.remove('drag-over');
+        });
+        panel.addEventListener('drop', (e) => {
+            e.preventDefault();
+            panel.classList.remove('drag-over');
+            const draggedName = e.dataTransfer.getData('text/plain');
+            const targetName = series.name;
+            if (draggedName === targetName) return;
+            const fromIdx = widgetOrder.indexOf(draggedName);
+            const toIdx = widgetOrder.indexOf(targetName);
+            if (fromIdx < 0 || toIdx < 0) return;
+            widgetOrder.splice(fromIdx, 1);
+            widgetOrder.splice(toIdx, 0, draggedName);
+            saveWidgetPrefs();
+            reorderDomWidgets();
+        });
+
         container.appendChild(panel);
     });
 
     setupChartHandlers();
+    updateWidgetMenu();
+}
+
+function reorderDomWidgets() {
+    const container = document.getElementById('charts-container');
+    if (!container) return;
+    const panels = Array.from(container.querySelectorAll('.widget-panel'));
+    const byName = {};
+    panels.forEach(p => { byName[p.getAttribute('data-series-name')] = p; });
+    widgetOrder.forEach(name => {
+        if (byName[name]) container.appendChild(byName[name]);
+    });
+}
+
+function updateWidgetMenu() {
+    const menu = document.getElementById('widget-menu');
+    if (!menu) return;
+    menu.innerHTML = '';
+    widgetOrder.forEach(name => {
+        const seriesData = data.series[name];
+        const label = seriesData?.beautiful_name || name;
+        const item = document.createElement('label');
+        item.className = 'widget-menu-item';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = !hiddenWidgets[name];
+        cb.addEventListener('change', () => {
+            if (cb.checked) {
+                delete hiddenWidgets[name];
+            } else {
+                hiddenWidgets[name] = true;
+            }
+            const panel = document.querySelector(`.widget-panel[data-series-name="${name}"]`);
+            if (panel) panel.style.display = hiddenWidgets[name] ? 'none' : '';
+            saveWidgetPrefs();
+        });
+        item.appendChild(cb);
+        item.appendChild(document.createTextNode(' ' + label));
+        menu.appendChild(item);
+    });
+}
+
+let fullscreenName = null;
+
+function openFullscreen(seriesName) {
+    fullscreenName = seriesName;
+    let overlay = document.getElementById('fs-overlay');
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.id = 'fs-overlay';
+        overlay.className = 'fs-overlay';
+        overlay.innerHTML = `
+            <div class="fs-header">
+                <h2 id="fs-title"></h2>
+                <button id="fs-close" class="widget-header-btn" style="font-size:22px;">&times;</button>
+            </div>
+            <div class="fs-chart-wrap chart">
+                <canvas id="fs-canvas"></canvas>
+                <canvas id="fs-canvas-ov" class="overlay"></canvas>
+            </div>
+            <div id="fs-legend" style="font-family: ui-monospace, monospace; font-size: 13px; margin-top: 8px; cursor: pointer; text-align: center;"></div>
+        `;
+        document.body.appendChild(overlay);
+        document.getElementById('fs-close').addEventListener('click', closeFullscreen);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) closeFullscreen(); });
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && fullscreenName) closeFullscreen(); });
+        setupFullscreenTooltip();
+    }
+
+    const seriesData = data.series[seriesName];
+    const title = seriesData?.beautiful_name || seriesName;
+    document.getElementById('fs-title').textContent = title;
+
+    overlay.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+
+    drawFullscreenChart();
+}
+
+function closeFullscreen() {
+    fullscreenName = null;
+    const overlay = document.getElementById('fs-overlay');
+    if (overlay) overlay.style.display = 'none';
+    document.body.style.overflow = '';
+    tooltip.style.display = 'none';
+}
+
+function drawFullscreenChart() {
+    if (!fullscreenName) return;
+    const view = getCurrentView();
+    if (!view || view.xs.length === 0) return;
+
+    const name = fullscreenName;
+    const seriesData = view.series[name];
+    if (!seriesData) return;
+
+    const canvas = document.getElementById('fs-canvas');
+    const wrap = canvas.parentElement;
+    const newW = wrap.clientWidth;
+    const newH = wrap.clientHeight;
+    if (canvas.width !== newW || canvas.height !== newH) {
+        canvas.width = newW;
+        canvas.height = newH;
+        const ovCanvas = document.getElementById('fs-canvas-ov');
+        ovCanvas.width = newW;
+        ovCanvas.height = newH;
+    }
+
+    const seriesList = [];
+    let maxLines = 0;
+    for (let i = view.startIdx; i < view.endIdx; i++) {
+        maxLines = Math.max(maxLines, (seriesData.values[i] || []).length);
+    }
+    for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
+        if (hiddenSeries[name]?.[lineIdx]) continue;
+        const ys = [];
+        let color = '#888';
+        for (let i = view.endIdx - 1; i >= view.startIdx; i--) {
+            const legends = seriesData.legends[i] || [];
+            if (legends[lineIdx]) { color = legends[lineIdx].color; break; }
+        }
+        for (let j = view.startIdx; j < view.endIdx; j++) {
+            ys.push(seriesData.values[j]?.[lineIdx] || 0);
+        }
+        seriesList.push({ ys, color, lineWidth: maxLines > 8 ? 1.5 : 2.5, lineIdx });
+    }
+
+    let minY = 0, maxY = 100;
+    if (seriesData.format) {
+        if (seriesData.format.type === 'Bytes' || seriesData.format.type !== 'Percentage') {
+            maxY = Math.max(1, ...seriesList.flatMap(s => s.ys)) * 1.1;
+        }
+    }
+
+    drawLineChart(canvas, seriesList, {
+        xs: view.xs, minY, maxY,
+        byteY: seriesData.format?.type === 'Bytes',
+        seriesName: name, seriesData, startIdx: view.startIdx
+    });
+
+    const legendDiv = document.getElementById('fs-legend');
+    if (legendDiv && seriesData.legends.length > 0) {
+        const latestLegends = seriesData.legends[seriesData.legends.length - 1] || [];
+        legendDiv.innerHTML = latestLegends.map((l, idx) =>
+            `<span data-series="${name}" data-index="${idx}" style="color:${l.color}; opacity: ${hiddenSeries[name]?.[idx] ? 0.3 : 1}; margin: 0 6px;">${l.name}${l.comment ? ' (' + l.comment + ')' : ''}</span>`
+        ).join('');
+    }
+}
+
+function setupFullscreenTooltip() {
+    const ovCanvas = document.getElementById('fs-canvas-ov');
+    if (!ovCanvas) return;
+    ovCanvas.style.pointerEvents = 'auto';
+
+    ovCanvas.addEventListener('mousemove', (e) => {
+        if (!fullscreenName) return;
+        const canvas = document.getElementById('fs-canvas');
+        const meta = canvas?.__meta;
+        if (!meta) return;
+
+        const rect = ovCanvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+
+        const ctx = ovCanvas.getContext('2d');
+        ctx.clearRect(0, 0, ovCanvas.width, ovCanvas.height);
+
+        const name = fullscreenName;
+        const seriesData = data.series[name];
+        if (!seriesData) return;
+
+        const xScale = (meta.maxX === meta.minX) ? 0 : (meta.w - meta.leftPad - meta.rightPad) / (meta.maxX - meta.minX);
+        const yScale = (meta.maxY === meta.minY) ? 0 : (meta.h - meta.topPad - meta.bottomPad) / (meta.maxY - meta.minY);
+
+        let nearestIdx = 0, nearestDist = Infinity;
+        const view = getCurrentView();
+        if (!view) return;
+        for (let i = 0; i < view.xs.length; i++) {
+            const px = meta.leftPad + (view.xs[i] - meta.minX) * xScale;
+            const dist = Math.abs(px - mx);
+            if (dist < nearestDist) { nearestDist = dist; nearestIdx = i; }
+        }
+        if (nearestDist > 40) { tooltip.style.display = 'none'; return; }
+
+        const nearestXPos = meta.leftPad + (view.xs[nearestIdx] - meta.minX) * xScale;
+        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(nearestXPos, 0);
+        ctx.lineTo(nearestXPos, ovCanvas.height);
+        ctx.stroke();
+
+        const dataIdx = view.startIdx + nearestIdx;
+        const rows = [`<div style="color:#9ca3af; margin-bottom:4px;">${fmtTime(view.xs[nearestIdx])}</div>`];
+        const pointLegends = seriesData.legends[dataIdx] || [];
+        for (let j = 0; j < pointLegends.length; j++) {
+            if (hiddenSeries[name]?.[j]) continue;
+            const legend = pointLegends[j];
+            const v = seriesData.values[dataIdx]?.[j] || 0;
+            const yPos = meta.topPad + (meta.h - meta.topPad - meta.bottomPad) - (v - meta.minY) * yScale;
+            ctx.fillStyle = legend.color;
+            ctx.beginPath();
+            ctx.arc(nearestXPos, yPos, 5, 0, Math.PI * 2);
+            ctx.fill();
+            let formattedValue = formatValue(v, seriesData.format);
+            let displayText = `<span style="color:${legend.color};">${legend.name}</span>: ${formattedValue}`;
+            if (legend.comment) displayText += ` <span style="color:#9ca3af; font-size:11px;">(${legend.comment})</span>`;
+            rows.push(`<div style="margin:2px 0;">${displayText}</div>`);
+        }
+        tooltip.innerHTML = rows.join('');
+        tooltip.style.display = 'block';
+        const tx = e.clientX + 14;
+        const ty = e.clientY + 14;
+        tooltip.style.left = Math.min(tx, window.innerWidth - 300) + 'px';
+        tooltip.style.top = Math.min(ty, window.innerHeight - 200) + 'px';
+    });
+
+    ovCanvas.addEventListener('mouseleave', () => {
+        const ctx = ovCanvas.getContext('2d');
+        ctx.clearRect(0, 0, ovCanvas.width, ovCanvas.height);
+        tooltip.style.display = 'none';
+    });
 }
 
 function pushDataPoint(rpcSnapshot) {
@@ -328,9 +643,47 @@ function drawLineChart(canvas, series, options) {
     const minY = options.minY;
     const maxY = options.maxY;
     const leftPad = 50;
-    const rightPad = 10;
+    const rightPad = 40;
     const topPad = 10;
     const bottomPad = 20;
+
+    const thresholdSeries = ['cpu_total', 'memory', 'swap', 'disk', 'gpu_util', 'gpu_mem'];
+    if (thresholdSeries.includes(options.seriesName) && maxY <= 100) {
+        const chartH = h - topPad - bottomPad;
+        const chartW = w - leftPad - rightPad;
+
+        const warnY = topPad + chartH * (1 - 70 / 100);
+        const critY = topPad + chartH * (1 - 90 / 100);
+        const bottomY = topPad + chartH;
+
+        ctx.fillStyle = 'rgba(250, 204, 21, 0.06)';
+        ctx.fillRect(leftPad, warnY, chartW, bottomY - warnY);
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
+        ctx.fillRect(leftPad, critY, chartW, warnY - critY);
+
+        ctx.setLineDash([6, 4]);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(250, 204, 21, 0.35)';
+        ctx.beginPath();
+        ctx.moveTo(leftPad, warnY);
+        ctx.lineTo(w - rightPad, warnY);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
+        ctx.beginPath();
+        ctx.moveTo(leftPad, critY);
+        ctx.lineTo(w - rightPad, critY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.font = '9px ui-monospace, monospace';
+        ctx.textBaseline = 'bottom';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = 'rgba(250, 204, 21, 0.6)';
+        ctx.fillText('warn 70%', w - rightPad - 2, warnY - 2);
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.7)';
+        ctx.fillText('crit 90%', w - rightPad - 2, critY - 2);
+    }
 
     canvas.__meta = { 
         minX, 
@@ -428,7 +781,7 @@ function drawTimeline() {
 
     const minX = data.xs[0];
     const maxX = data.xs[data.xs.length - 1];
-    const pad = 70;
+    const pad = 0;
     const timeLabelArea = 35;
 
     if (data.series['cpu_total'] && data.series['cpu_total'].values.length > 0) {
@@ -441,7 +794,9 @@ function drawTimeline() {
 
         for (let i = 0; i < data.xs.length; i += step) {
             const x = pad + ((data.xs[i] - minX) / (maxX - minX)) * (w - 2 * pad);
-            const y = 10 + ((data.series['cpu_total'].values[i][0] || 0) / 100) * (h - pad - 20);
+            const chartTop = 14;
+            const chartBot = h - timeLabelArea - 4;
+            const y = chartTop + (1 - (data.series['cpu_total'].values[i][0] || 0) / 100) * (chartBot - chartTop);
 
             if (first) {
                 ctx.moveTo(x, y);
@@ -498,7 +853,6 @@ function drawTimeline() {
     ctx.font = '10px ui-monospace, monospace';
     ctx.fillStyle = '#9ca3af';
     ctx.textBaseline = 'top';
-    ctx.textAlign = 'center';
     
     const timeLabels = 8;
     for (let i = 0; i <= timeLabels; i++) {
@@ -513,8 +867,17 @@ function drawTimeline() {
         ctx.lineTo(x, h - timeLabelArea + 5);
         ctx.stroke();
         ctx.fillStyle = '#9ca3af';
+        if (i === 0) {
+            ctx.textAlign = 'left';
+        } else if (i === timeLabels) {
+            ctx.textAlign = 'right';
+        } else {
+            ctx.textAlign = 'center';
+        }
         ctx.fillText(timeStr, x, h - timeLabelArea + 8);
     }
+
+    const chartMidY = Math.round((h - timeLabelArea) / 2);
 
     if (windowMs > 0 && windowStartMs) {
         const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (w - 2 * pad);
@@ -522,16 +885,14 @@ function drawTimeline() {
 
         const clampedX0 = Math.max(pad, Math.min(w - pad, x0));
         const clampedX1 = Math.max(pad, Math.min(w - pad, x1));
-        ctx.font = '9px ui-monospace, monospace';
-        ctx.fillStyle = '#3b82f6';
-        const startTimeStr = fmtTime(windowStartMs);
-        const endTimeStr = fmtTime(windowStartMs + windowMs);
+        ctx.font = 'bold 12px ui-monospace, monospace';
+        ctx.fillStyle = '#e0f2fe';
+        ctx.textBaseline = 'middle';
 
-        const textWidth = ctx.measureText(startTimeStr).width;
-        if (clampedX0 + textWidth < clampedX1) {
-            ctx.fillText(startTimeStr, clampedX0, h - timeLabelArea + 20);
-            ctx.fillText(endTimeStr, clampedX1 - 40, h - timeLabelArea + 20);
-        }
+        ctx.textAlign = 'left';
+        ctx.fillText(fmtTime(windowStartMs), clampedX0 + 4, chartMidY);
+        ctx.textAlign = 'right';
+        ctx.fillText(fmtTime(windowStartMs + windowMs), clampedX1 - 4, chartMidY);
     }
 
     if (selectionStart !== null && selectionEnd !== null && selectionEnd - selectionStart > 20) {
@@ -543,41 +904,16 @@ function drawTimeline() {
         const timeStart = minX + ((xStart - pad) / (w - 2 * pad)) * (maxX - minX);
         const timeEnd = minX + ((xEnd - pad) / (w - 2 * pad)) * (maxX - minX);
 
-        ctx.font = '9px ui-monospace, monospace';
-        ctx.fillStyle = '#ec4899';
+        ctx.font = 'bold 12px ui-monospace, monospace';
+        ctx.fillStyle = '#fce7f3';
+        ctx.textBaseline = 'middle';
 
-        const startTimeStr = fmtTime(timeStart);
-        const endTimeStr = fmtTime(timeEnd);
-
-        const textWidth = ctx.measureText(startTimeStr).width;
-        if (xStart + textWidth < xEnd) {
-            ctx.fillText(startTimeStr, xStart, h - timeLabelArea + 20);
-            ctx.fillText(endTimeStr, xEnd - 40, h - timeLabelArea + 20);
-        }
+        ctx.textAlign = 'left';
+        ctx.fillText(fmtTime(timeStart), xStart + 4, chartMidY);
+        ctx.textAlign = 'right';
+        ctx.fillText(fmtTime(timeEnd), xEnd - 4, chartMidY);
     }
 
-    ctx.font = '10px ui-monospace, monospace';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-
-    ctx.fillStyle = '#3b82f6';
-    ctx.fillRect(10, 10, 12, 12);
-    ctx.fillStyle = '#9ca3af';
-    ctx.fillText('Current view', 28, 10);
-
-    ctx.fillStyle = '#ec4899';
-    ctx.fillRect(10, 30, 12, 12);
-    ctx.fillStyle = '#9ca3af';
-    ctx.fillText('Selection', 28, 30);
-
-    ctx.textAlign = 'right';
-    ctx.fillStyle = '#6b7280';
-    ctx.font = '9px ui-monospace, monospace';
-    ctx.fillText('Drag inside to move', w - 10, 10);
-    ctx.fillText('Drag edges to resize', w - 10, 25);
-    ctx.fillText('Drag outside to select', w - 10, 40);
-    ctx.fillText('Double-click → live', w - 10, 55);
-    ctx.fillText('Drag to end → auto-live', w - 10, 70);
 }
 
 function updateStatCards(snapshot) {
@@ -671,7 +1007,7 @@ function setupChartHandlers() {
 
             if (selectionStart !== null && selectionEnd !== null) {
                 const rect = document.getElementById('timeline').getBoundingClientRect();
-                const pad = 40;
+                const pad = 0;
 
                 ctx.strokeStyle = '#ec4899';
                 ctx.lineWidth = 1;
@@ -768,7 +1104,7 @@ function setupTimelineDrag() {
         if (data.xs.length < 2) return;
         const rect = tl.getBoundingClientRect();
         const x = e.clientX - rect.left;
-        const pad = 70;
+        const pad = 0;
         const timeLabelArea = 35;
 
         if (e.clientY > rect.bottom - timeLabelArea) {
@@ -821,7 +1157,7 @@ function setupTimelineDrag() {
             if (data.xs.length >= 2 && windowMs > 0 && windowStartMs) {
                 const rect = tl.getBoundingClientRect();
                 const x = e.clientX - rect.left;
-                const pad = 40;
+                const pad = 0;
                 
                 const minX = data.xs[0];
                 const maxX = data.xs[data.xs.length - 1];
@@ -844,7 +1180,7 @@ function setupTimelineDrag() {
 
         const rect = tl.getBoundingClientRect();
         const currentX = e.clientX - rect.left;
-        const pad = 40;
+        const pad = 0;
         const clampedX = Math.max(pad, Math.min(rect.width - pad, currentX));
 
         if (isDraggingWindow) {
@@ -892,7 +1228,7 @@ function setupTimelineDrag() {
             drawTimeline();
 
             const rect = tl.getBoundingClientRect();
-            const pad = 40;
+            const pad = 0;
             const rightEdge = rect.width - pad;
 
             if (Math.abs(clampedX - rightEdge) < 5) {
@@ -904,7 +1240,7 @@ function setupTimelineDrag() {
     window.addEventListener('mouseup', () => {
         if (isSelecting && selectionStart !== null && selectionEnd !== null) {
             const rect = tl.getBoundingClientRect();
-            const pad = 40;
+            const pad = 0;
 
             const xStart = Math.min(selectionStart, selectionEnd);
             const xEnd = Math.max(selectionStart, selectionEnd);
@@ -1121,6 +1457,7 @@ function startStream() {
 
             if (followLive) {
                 drawAllCharts();
+                if (fullscreenName) drawFullscreenChart();
             }
         } catch (e) {
             console.error('Stream error:', e);
@@ -1246,9 +1583,26 @@ function updateEndSlider() {
     }
 }
 
+function initWidgetMenu() {
+    const btn = document.getElementById('widget-menu-btn');
+    const menu = document.getElementById('widget-menu');
+    if (!btn || !menu) return;
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        menu.classList.toggle('open');
+    });
+    document.addEventListener('click', (e) => {
+        if (!menu.contains(e.target) && e.target !== btn) {
+            menu.classList.remove('open');
+        }
+    });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     initWindowButtons();
     initSliders();
+    initWidgetMenu();
     fetchHistory();
     startStream();
     setupTimelineDrag();

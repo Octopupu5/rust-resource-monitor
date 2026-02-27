@@ -84,6 +84,7 @@ mod tests {
                 used_pct: 60.0,
             },
             battery: None,
+            gpu: None,
         }
     }
 

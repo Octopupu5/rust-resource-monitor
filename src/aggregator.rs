@@ -1,7 +1,7 @@
 use crate::bus::publish_snapshot;
 use crate::metrics::{
-    now_timestamp_ms, BatteryMetrics, CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot,
-    NetworkMetrics,
+    now_timestamp_ms, BatteryMetrics, CpuMetrics, DiskMetrics, GpuMetrics, MemoryMetrics,
+    MetricsSnapshot, NetworkMetrics,
 };
 use battery::{Manager, State};
 use std::time::{Duration, Instant};
@@ -82,12 +82,22 @@ impl Aggregator {
             // Получаем данные о батарее - инициализируем менеджер каждый раз
             // или сохраняем в локальную переменную внутри цикла
             let battery_metrics = get_battery_metrics();
+            let gpu_metrics = get_gpu_metrics();
 
-            // Логируем данные о батарее для отладки
             if let Some(battery) = &battery_metrics {
                 debug!(
                     "Battery: {}% ({}), Power: {}W, Time to empty: {:?}",
                     battery.percentage, battery.state, battery.power_now, battery.time_to_empty
+                );
+            }
+            if let Some(gpu) = &gpu_metrics {
+                debug!(
+                    "GPU: {} util={}%, mem={}/{} unified={}",
+                    gpu.name,
+                    gpu.gpu_utilization_pct,
+                    gpu.vram_used_bytes,
+                    gpu.vram_total_bytes,
+                    gpu.is_unified_memory
                 );
             }
 
@@ -162,6 +172,7 @@ impl Aggregator {
                     used_pct: disk_used_pct,
                 },
                 battery: battery_metrics,
+                gpu: gpu_metrics,
             };
 
             publish_snapshot(snapshot);
@@ -247,4 +258,145 @@ fn sum_disk_avail(disks: &Disks) -> u64 {
     disks
         .iter()
         .fold(0, |acc, disk| acc + disk.available_space())
+}
+
+fn get_gpu_metrics() -> Option<GpuMetrics> {
+    try_nvidia_smi().or_else(try_macos_ioreg)
+}
+
+fn try_nvidia_smi() -> Option<GpuMetrics> {
+    let output = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=name,utilization.gpu,memory.total,memory.used,temperature.gpu",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = text.trim().split(", ").collect();
+    if parts.len() < 5 {
+        return None;
+    }
+
+    Some(GpuMetrics {
+        name: parts[0].to_string(),
+        gpu_utilization_pct: parts[1].trim().parse().ok()?,
+        vram_total_bytes: parts[2].trim().parse::<u64>().ok()? * 1024 * 1024,
+        vram_used_bytes: parts[3].trim().parse::<u64>().ok()? * 1024 * 1024,
+        temperature_celsius: parts[4].trim().parse().ok(),
+        is_unified_memory: false,
+    })
+}
+
+fn try_macos_ioreg() -> Option<GpuMetrics> {
+    let output = std::process::Command::new("ioreg")
+        .args(["-r", "-d", "1", "-c", "IOAccelerator"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.is_empty() {
+        return None;
+    }
+
+    let utilization = parse_ioreg_int(&text, "Device Utilization %")
+        .or_else(|| parse_ioreg_int(&text, "GPU Activity(%)"))
+        .unwrap_or(0) as f32;
+
+    let vram_used = parse_ioreg_int(&text, "In Use System Memory").unwrap_or(0) as u64;
+    let vram_total = parse_ioreg_int(&text, "Alloc system memory")
+        .or_else(|| parse_ioreg_int(&text, "Allocated System Memory"))
+        .map(|v| v as u64)
+        .or_else(|| {
+            let total = parse_ioreg_int(&text, "VRAM,totalMB").unwrap_or(0) as u64;
+            if total > 0 {
+                Some(total * 1024 * 1024)
+            } else {
+                None
+            }
+        })
+        .unwrap_or(0);
+
+    if vram_used == 0 && vram_total == 0 && utilization == 0.0 {
+        return None;
+    }
+
+    let name = parse_ioreg_string(&text, "model")
+        .or_else(detect_macos_gpu_name)
+        .unwrap_or_else(|| "Apple GPU".to_string());
+
+    Some(GpuMetrics {
+        name,
+        gpu_utilization_pct: utilization,
+        vram_total_bytes: vram_total,
+        vram_used_bytes: vram_used,
+        temperature_celsius: None,
+        is_unified_memory: true,
+    })
+}
+
+fn parse_ioreg_int(text: &str, key: &str) -> Option<i64> {
+    let search = format!("\"{}\"", key);
+    for line in text.lines() {
+        if !line.contains(&search) {
+            continue;
+        }
+        if let Some(pos) = line.find(&search) {
+            let after = &line[pos + search.len()..];
+            let after = after.trim_start().trim_start_matches('=').trim_start();
+            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if !num_str.is_empty() {
+                return num_str.parse().ok();
+            }
+        }
+    }
+    None
+}
+
+fn parse_ioreg_string(text: &str, key: &str) -> Option<String> {
+    let search = format!("\"{}\"", key);
+    for line in text.lines() {
+        if !line.contains(&search) {
+            continue;
+        }
+        if let Some(pos) = line.find(&search) {
+            let after = &line[pos + search.len()..];
+            let after = after.trim_start().trim_start_matches('=').trim_start();
+            if let Some(inner) = after.strip_prefix('"') {
+                if let Some(end) = inner.find('"') {
+                    return Some(inner[..end].to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_macos_gpu_name() -> Option<String> {
+    let output = std::process::Command::new("system_profiler")
+        .args(["SPDisplaysDataType", "-json"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let displays = json.get("SPDisplaysDataType")?.as_array()?;
+    let first = displays.first()?;
+    first
+        .get("sppci_model")
+        .and_then(|v| v.as_str())
+        .map(String::from)
 }

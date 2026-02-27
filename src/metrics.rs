@@ -80,7 +80,16 @@ pub struct DiskMetrics {
     pub used_pct: f32,
 }
 
-// Внутренняя структура для хранения в буфере
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GpuMetrics {
+    pub name: String,
+    pub gpu_utilization_pct: f32,
+    pub vram_total_bytes: u64,
+    pub vram_used_bytes: u64,
+    pub temperature_celsius: Option<f32>,
+    pub is_unified_memory: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MetricsSnapshot {
     pub timestamp_ms: u128,
@@ -89,6 +98,7 @@ pub struct MetricsSnapshot {
     pub network: NetworkMetrics,
     pub disk: DiskMetrics,
     pub battery: Option<BatteryMetrics>,
+    pub gpu: Option<GpuMetrics>,
 }
 
 impl MetricsSnapshot {
@@ -230,7 +240,47 @@ impl MetricsSnapshot {
             },
         ];
 
-        // Добавляем батарею если доступна
+        if let Some(gpu) = &self.gpu {
+            let vram_used_pct = if gpu.vram_total_bytes > 0 {
+                (gpu.vram_used_bytes as f32 / gpu.vram_total_bytes as f32) * 100.0
+            } else {
+                0.0
+            };
+            let mem_label = if gpu.is_unified_memory {
+                "Unified"
+            } else {
+                "VRAM"
+            };
+
+            data.push(MetricSeries {
+                name: "gpu_util".to_string(),
+                beautiful_name: format!("GPU Utilization – {}", gpu.name),
+                series: vec![gpu.gpu_utilization_pct],
+                legend: vec![MetricLegend {
+                    name: "GPU".to_string(),
+                    color: "#a855f7".to_string(),
+                    comment: gpu.temperature_celsius.map(|t| format!("{t:.0} °C")),
+                }],
+                format: DisplayFormat::Percentage { decimals: 1 },
+            });
+
+            data.push(MetricSeries {
+                name: "gpu_mem".to_string(),
+                beautiful_name: format!("GPU {} Used (%)", mem_label),
+                series: vec![vram_used_pct],
+                legend: vec![MetricLegend {
+                    name: mem_label.to_string(),
+                    color: "#d946ef".to_string(),
+                    comment: Some(format!(
+                        "{} / {}",
+                        format_bytes_short(gpu.vram_used_bytes),
+                        format_bytes_short(gpu.vram_total_bytes)
+                    )),
+                }],
+                format: DisplayFormat::Percentage { decimals: 1 },
+            });
+        }
+
         if let Some(battery) = &self.battery {
             data.extend(vec![
                 // Battery percentage
@@ -279,6 +329,20 @@ pub fn now_timestamp_ms() -> u128 {
             tracing::error!("SystemTime before UNIX_EPOCH: {}", err);
             0
         }
+    }
+}
+
+fn format_bytes_short(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.0} MB", b / MB)
+    } else {
+        format!("{:.0} KB", b / KB)
     }
 }
 

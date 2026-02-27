@@ -80,6 +80,36 @@ fn render_once(buffer: &MetricsBuffer) -> std::io::Result<()> {
         format_bytes(snap.network.tx_bytes_total)
     )?;
 
+    if let Some(gpu) = &snap.gpu {
+        let mem_label = if gpu.is_unified_memory {
+            "Unified"
+        } else {
+            "VRAM"
+        };
+        let vram_pct = if gpu.vram_total_bytes > 0 {
+            gpu.vram_used_bytes as f32 / gpu.vram_total_bytes as f32 * 100.0
+        } else {
+            0.0
+        };
+        let gpu_colored = color_pct(gpu.gpu_utilization_pct, 50.0, 80.0);
+        let mem_colored = color_pct(vram_pct, 70.0, 90.0);
+        let temp_str = gpu
+            .temperature_celsius
+            .map(|t| format!("  {t:.0}°C"))
+            .unwrap_or_default();
+        writeln!(
+            out,
+            "GPU: {} – {} util  {} {}: {} / {}{}",
+            gpu.name,
+            gpu_colored,
+            mem_colored,
+            mem_label,
+            format_bytes(gpu.vram_used_bytes),
+            format_bytes(gpu.vram_total_bytes),
+            temp_str
+        )?;
+    }
+
     writeln!(out)?;
     writeln!(out, "Per-core CPU usage:")?;
     for (i, pct) in snap.cpu.per_core_usage_pct.iter().enumerate() {

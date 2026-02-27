@@ -143,5 +143,6 @@ fn sample_snapshot(ts: u128) -> MetricsSnapshot {
             used_pct: 60.0,
         },
         battery: None,
+        gpu: None,
     }
 }
