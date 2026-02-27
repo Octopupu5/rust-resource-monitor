@@ -382,7 +382,8 @@ function drawFullscreenChart() {
     drawLineChart(canvas, seriesList, {
         xs: view.xs, minY, maxY,
         byteY: seriesData.format?.type === 'Bytes',
-        seriesName: name, seriesData, startIdx: view.startIdx
+        seriesName: name, seriesData, startIdx: view.startIdx,
+        warn: seriesData.warn, crit: seriesData.crit
     });
 
     const legendDiv = document.getElementById('fs-legend');
@@ -484,7 +485,9 @@ function pushDataPoint(rpcSnapshot) {
                 values: [],
                 legends: [],
                 format: series.format,
-                beautiful_name: series.beautiful_name
+                beautiful_name: series.beautiful_name,
+                warn: series.warn ?? null,
+                crit: series.crit ?? null
             };
         }
         data.series[series.name].values.push(series.series);
@@ -611,7 +614,9 @@ function drawAllCharts() {
             byteY: seriesData.format?.type === 'Bytes',
             seriesName: name,
             seriesData: seriesData,
-            startIdx: view.startIdx
+            startIdx: view.startIdx,
+            warn: seriesData.warn,
+            crit: seriesData.crit
         });
     });
 
@@ -647,42 +652,80 @@ function drawLineChart(canvas, series, options) {
     const topPad = 10;
     const bottomPad = 20;
 
-    const thresholdSeries = ['cpu_total', 'memory', 'swap', 'disk', 'gpu_util', 'gpu_mem'];
-    if (thresholdSeries.includes(options.seriesName) && maxY <= 100) {
+    const warnVal = options.warn;
+    const critVal = options.crit;
+    if (warnVal != null || critVal != null) {
         const chartH = h - topPad - bottomPad;
         const chartW = w - leftPad - rightPad;
-
-        const warnY = topPad + chartH * (1 - 70 / 100);
-        const critY = topPad + chartH * (1 - 90 / 100);
+        const valToY = (v) => topPad + chartH * (1 - (v - minY) / (maxY - minY));
         const bottomY = topPad + chartH;
-
-        ctx.fillStyle = 'rgba(250, 204, 21, 0.06)';
-        ctx.fillRect(leftPad, warnY, chartW, bottomY - warnY);
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
-        ctx.fillRect(leftPad, critY, chartW, warnY - critY);
 
         ctx.setLineDash([6, 4]);
         ctx.lineWidth = 1;
-        ctx.strokeStyle = 'rgba(250, 204, 21, 0.35)';
-        ctx.beginPath();
-        ctx.moveTo(leftPad, warnY);
-        ctx.lineTo(w - rightPad, warnY);
-        ctx.stroke();
 
-        ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
-        ctx.beginPath();
-        ctx.moveTo(leftPad, critY);
-        ctx.lineTo(w - rightPad, critY);
-        ctx.stroke();
+        if (warnVal != null && critVal != null && critVal > warnVal) {
+            const warnY = valToY(warnVal);
+            const critY = valToY(critVal);
+            ctx.fillStyle = 'rgba(250, 204, 21, 0.06)';
+            ctx.fillRect(leftPad, warnY, chartW, bottomY - warnY);
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
+            ctx.fillRect(leftPad, critY, chartW, warnY - critY);
+
+            ctx.strokeStyle = 'rgba(250, 204, 21, 0.35)';
+            ctx.beginPath(); ctx.moveTo(leftPad, warnY); ctx.lineTo(w - rightPad, warnY); ctx.stroke();
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
+            ctx.beginPath(); ctx.moveTo(leftPad, critY); ctx.lineTo(w - rightPad, critY); ctx.stroke();
+
+            ctx.setLineDash([]);
+            ctx.font = '9px ui-monospace, monospace';
+            ctx.textBaseline = 'bottom';
+            ctx.textAlign = 'right';
+            ctx.fillStyle = 'rgba(250, 204, 21, 0.6)';
+            ctx.fillText(`warn ${warnVal}%`, w - rightPad - 2, warnY - 2);
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.7)';
+            ctx.fillText(`crit ${critVal}%`, w - rightPad - 2, critY - 2);
+        } else if (warnVal != null && critVal != null && critVal < warnVal) {
+            const warnY = valToY(warnVal);
+            const critY = valToY(critVal);
+            ctx.fillStyle = 'rgba(250, 204, 21, 0.06)';
+            ctx.fillRect(leftPad, topPad, chartW, warnY - topPad);
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.08)';
+            ctx.fillRect(leftPad, warnY, chartW, critY - warnY);
+
+            ctx.strokeStyle = 'rgba(250, 204, 21, 0.35)';
+            ctx.beginPath(); ctx.moveTo(leftPad, warnY); ctx.lineTo(w - rightPad, warnY); ctx.stroke();
+            ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
+            ctx.beginPath(); ctx.moveTo(leftPad, critY); ctx.lineTo(w - rightPad, critY); ctx.stroke();
+
+            ctx.setLineDash([]);
+            ctx.font = '9px ui-monospace, monospace';
+            ctx.textBaseline = 'top';
+            ctx.textAlign = 'right';
+            ctx.fillStyle = 'rgba(250, 204, 21, 0.6)';
+            ctx.fillText(`warn ${warnVal}%`, w - rightPad - 2, warnY + 2);
+            ctx.fillStyle = 'rgba(239, 68, 68, 0.7)';
+            ctx.fillText(`crit ${critVal}%`, w - rightPad - 2, critY + 2);
+        } else {
+            if (warnVal != null) {
+                const wy = valToY(warnVal);
+                ctx.strokeStyle = 'rgba(250, 204, 21, 0.35)';
+                ctx.beginPath(); ctx.moveTo(leftPad, wy); ctx.lineTo(w - rightPad, wy); ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.font = '9px ui-monospace, monospace'; ctx.textBaseline = 'bottom'; ctx.textAlign = 'right';
+                ctx.fillStyle = 'rgba(250, 204, 21, 0.6)';
+                ctx.fillText(`warn ${warnVal}%`, w - rightPad - 2, wy - 2);
+            }
+            if (critVal != null) {
+                const cy = valToY(critVal);
+                ctx.strokeStyle = 'rgba(239, 68, 68, 0.45)';
+                ctx.beginPath(); ctx.moveTo(leftPad, cy); ctx.lineTo(w - rightPad, cy); ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.font = '9px ui-monospace, monospace'; ctx.textBaseline = 'bottom'; ctx.textAlign = 'right';
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.7)';
+                ctx.fillText(`crit ${critVal}%`, w - rightPad - 2, cy - 2);
+            }
+        }
         ctx.setLineDash([]);
-
-        ctx.font = '9px ui-monospace, monospace';
-        ctx.textBaseline = 'bottom';
-        ctx.textAlign = 'right';
-        ctx.fillStyle = 'rgba(250, 204, 21, 0.6)';
-        ctx.fillText('warn 70%', w - rightPad - 2, warnY - 2);
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.7)';
-        ctx.fillText('crit 90%', w - rightPad - 2, critY - 2);
     }
 
     canvas.__meta = { 

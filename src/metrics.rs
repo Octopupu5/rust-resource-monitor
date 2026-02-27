@@ -14,6 +14,10 @@ pub struct MetricSeries {
     pub series: Vec<f32>,
     pub legend: Vec<MetricLegend>,
     pub format: DisplayFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warn: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crit: Option<f32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -120,7 +124,6 @@ impl MetricsSnapshot {
         };
 
         let mut data = vec![
-            // CPU total
             MetricSeries {
                 name: "cpu_total".to_string(),
                 beautiful_name: "CPU total (%)".to_string(),
@@ -131,8 +134,9 @@ impl MetricsSnapshot {
                     comment: None,
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
+                warn: Some(70.0),
+                crit: Some(90.0),
             },
-            // CPU per core
             MetricSeries {
                 name: "cpu_cores".to_string(),
                 beautiful_name: "CPU per core (%)".to_string(),
@@ -152,8 +156,9 @@ impl MetricsSnapshot {
                     })
                     .collect(),
                 format: DisplayFormat::Percentage { decimals: 1 },
+                warn: None,
+                crit: None,
             },
-            // Load average
             MetricSeries {
                 name: "load_avg".to_string(),
                 beautiful_name: "CPU Load Average".to_string(),
@@ -180,8 +185,9 @@ impl MetricsSnapshot {
                     },
                 ],
                 format: DisplayFormat::Float { decimals: 2 },
+                warn: None,
+                crit: None,
             },
-            // Memory used
             MetricSeries {
                 name: "memory".to_string(),
                 beautiful_name: "Memory used (%)".to_string(),
@@ -192,8 +198,9 @@ impl MetricsSnapshot {
                     comment: None,
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
+                warn: Some(70.0),
+                crit: Some(90.0),
             },
-            // Swap used
             MetricSeries {
                 name: "swap".to_string(),
                 beautiful_name: "Swap used (%)".to_string(),
@@ -204,8 +211,9 @@ impl MetricsSnapshot {
                     comment: None,
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
+                warn: Some(70.0),
+                crit: Some(90.0),
             },
-            // Network RX/TX
             MetricSeries {
                 name: "network".to_string(),
                 beautiful_name: "Network".to_string(),
@@ -225,8 +233,9 @@ impl MetricsSnapshot {
                 format: DisplayFormat::Bytes {
                     suffix: "B/s".to_string(),
                 },
+                warn: None,
+                crit: None,
             },
-            // Disk used
             MetricSeries {
                 name: "disk".to_string(),
                 beautiful_name: "Disk used (%)".to_string(),
@@ -237,6 +246,8 @@ impl MetricsSnapshot {
                     comment: None,
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
+                warn: Some(70.0),
+                crit: Some(90.0),
             },
         ];
 
@@ -262,6 +273,8 @@ impl MetricsSnapshot {
                     comment: gpu.temperature_celsius.map(|t| format!("{t:.0} °C")),
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
+                warn: Some(70.0),
+                crit: Some(90.0),
             });
 
             data.push(MetricSeries {
@@ -278,12 +291,13 @@ impl MetricsSnapshot {
                     )),
                 }],
                 format: DisplayFormat::Percentage { decimals: 1 },
+                warn: Some(70.0),
+                crit: Some(90.0),
             });
         }
 
         if let Some(battery) = &self.battery {
             data.extend(vec![
-                // Battery percentage
                 MetricSeries {
                     name: "battery".to_string(),
                     beautiful_name: "Battery Level".to_string(),
@@ -294,8 +308,9 @@ impl MetricsSnapshot {
                         comment: Some(battery.state.clone()),
                     }],
                     format: DisplayFormat::Percentage { decimals: 1 },
+                    warn: Some(30.0),
+                    crit: Some(10.0),
                 },
-                // Battery power
                 MetricSeries {
                     name: "battery_power".to_string(),
                     beautiful_name: "Battery Power".to_string(),
@@ -306,6 +321,8 @@ impl MetricsSnapshot {
                         comment: None,
                     }],
                     format: DisplayFormat::Float { decimals: 2 },
+                    warn: None,
+                    crit: None,
                 },
             ]);
         }
