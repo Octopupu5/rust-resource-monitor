@@ -23,6 +23,11 @@ let isResizingRight = false;
 let isMoving = false;
 let initialWindowMs = 0;
 
+let minTimestamp = null;
+let maxTimestamp = null;
+
+let isDraggingActive = false;
+
 const style = document.createElement('style');
 style.textContent = `
     #timeline {
@@ -189,23 +194,23 @@ function createChartsFromSnapshot(snapshot) {
             legend.innerHTML = series.legend.map((l, idx) => 
                 `<span data-series="${series.name}" data-index="${idx}" style="color:${l.color}; opacity: ${hiddenSeries[series.name]?.[idx] ? 0.3 : 1};">${l.name}</span>`
             ).join(' ');
-            
+
             legend.addEventListener('click', (e) => {
                 const target = e.target;
                 if (target.tagName === 'SPAN') {
                     const seriesName = target.dataset.series;
                     const idx = parseInt(target.dataset.index);
-                    
+
                     if (!hiddenSeries[seriesName]) {
                         hiddenSeries[seriesName] = {};
                     }
                     hiddenSeries[seriesName][idx] = !hiddenSeries[seriesName][idx];
-                    
+
                     target.style.opacity = hiddenSeries[seriesName][idx] ? 0.3 : 1;
                     drawAllCharts();
                 }
             });
-            
+
             panel.appendChild(legend);
         }
 
@@ -335,7 +340,11 @@ function closeFullscreen() {
 function drawFullscreenChart() {
     if (!fullscreenName) return;
     const view = getCurrentView();
-    if (!view || view.xs.length === 0) return;
+    if (!view || view.xs.length === 0) {
+        const canvas = document.getElementById('fs-canvas');
+        if (canvas) drawEmptyChart(canvas, 'No data in range');
+        return;
+    }
 
     const name = fullscreenName;
     const seriesData = view.series[name];
@@ -358,32 +367,103 @@ function drawFullscreenChart() {
     for (let i = view.startIdx; i < view.endIdx; i++) {
         maxLines = Math.max(maxLines, (seriesData.values[i] || []).length);
     }
+
+    let hasAnyDataInSeries = false;
+
     for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
         if (hiddenSeries[name]?.[lineIdx]) continue;
-        const ys = [];
+
+        const segments = [];
+        let currentSegment = { xs: [], ys: [], valid: false };
+        let hasAnyData = false;
+
+        for (let j = view.startIdx; j < view.endIdx; j++) {
+            const value = seriesData.values[j]?.[lineIdx];
+            const ts = view.xs[j - view.startIdx];
+
+            if (value !== undefined && value !== null && !isNaN(value)) {
+                hasAnyData = true;
+                hasAnyDataInSeries = true;
+
+                if (!currentSegment.valid) {
+
+                    currentSegment = { xs: [ts], ys: [value], valid: true };
+                } else {
+
+                    const lastTs = currentSegment.xs[currentSegment.xs.length - 1];
+                    if (ts - lastTs < 5000) {
+                        currentSegment.xs.push(ts);
+                        currentSegment.ys.push(value);
+                    } else {
+
+                        if (currentSegment.xs.length > 1) {
+                            segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
+                        }
+                        currentSegment = { xs: [ts], ys: [value], valid: true };
+                    }
+                }
+            } else {
+                if (currentSegment.valid) {
+
+                    if (currentSegment.xs.length > 1) {
+                        segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
+                    }
+                    currentSegment = { xs: [], ys: [], valid: false };
+                }
+            }
+        }
+
+        if (currentSegment.valid && currentSegment.xs.length > 1) {
+            segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
+        }
+
+        if (!hasAnyData) continue;
+
         let color = '#888';
         for (let i = view.endIdx - 1; i >= view.startIdx; i--) {
             const legends = seriesData.legends[i] || [];
-            if (legends[lineIdx]) { color = legends[lineIdx].color; break; }
+            if (legends[lineIdx]) {
+                color = legends[lineIdx].color;
+                break;
+            }
         }
-        for (let j = view.startIdx; j < view.endIdx; j++) {
-            ys.push(seriesData.values[j]?.[lineIdx] || 0);
-        }
-        seriesList.push({ ys, color, lineWidth: maxLines > 8 ? 1.5 : 2.5, lineIdx });
+
+        segments.forEach(segment => {
+            seriesList.push({
+                ys: segment.ys,
+                xs: segment.xs,
+                color: color,
+                lineWidth: maxLines > 8 ? 1.5 : 2.5,
+                lineIdx: lineIdx
+            });
+        });
+    }
+
+    if (!hasAnyDataInSeries || seriesList.length === 0) {
+        drawEmptyChart(canvas, 'No data in range');
+        return;
     }
 
     let minY = 0, maxY = 100;
     if (seriesData.format) {
-        if (seriesData.format.type === 'Bytes' || seriesData.format.type !== 'Percentage') {
-            maxY = Math.max(1, ...seriesList.flatMap(s => s.ys)) * 1.1;
+        const allYs = seriesList.flatMap(s => s.ys).filter(y => isFinite(y) && !isNaN(y));
+        if (allYs.length > 0) {
+            if (seriesData.format.type === 'Bytes' || seriesData.format.type !== 'Percentage') {
+                maxY = Math.max(1, ...allYs) * 1.1;
+            }
         }
     }
 
     drawLineChart(canvas, seriesList, {
-        xs: view.xs, minY, maxY,
+        xs: view.xs, 
+        minY, 
+        maxY,
         byteY: seriesData.format?.type === 'Bytes',
-        seriesName: name, seriesData, startIdx: view.startIdx,
-        warn: seriesData.warn, crit: seriesData.crit
+        seriesName: name, 
+        seriesData, 
+        startIdx: view.startIdx,
+        warn: seriesData.warn, 
+        crit: seriesData.crit
     });
 
     const legendDiv = document.getElementById('fs-legend');
@@ -420,15 +500,27 @@ function setupFullscreenTooltip() {
         const xScale = (meta.maxX === meta.minX) ? 0 : (meta.w - meta.leftPad - meta.rightPad) / (meta.maxX - meta.minX);
         const yScale = (meta.maxY === meta.minY) ? 0 : (meta.h - meta.topPad - meta.bottomPad) / (meta.maxY - meta.minY);
 
-        let nearestIdx = 0, nearestDist = Infinity;
+        let nearestIdx = -1;
+        let nearestDist = Infinity;
         const view = getCurrentView();
         if (!view) return;
+
         for (let i = 0; i < view.xs.length; i++) {
+            const value = seriesData.values[view.startIdx + i]?.[0];
+            if (value === undefined || value === null || isNaN(value)) continue;
+
             const px = meta.leftPad + (view.xs[i] - meta.minX) * xScale;
             const dist = Math.abs(px - mx);
-            if (dist < nearestDist) { nearestDist = dist; nearestIdx = i; }
+            if (dist < nearestDist) { 
+                nearestDist = dist; 
+                nearestIdx = i; 
+            }
         }
-        if (nearestDist > 40) { tooltip.style.display = 'none'; return; }
+
+        if (nearestIdx === -1 || nearestDist > 40) { 
+            tooltip.style.display = 'none'; 
+            return; 
+        }
 
         const nearestXPos = meta.leftPad + (view.xs[nearestIdx] - meta.minX) * xScale;
         ctx.strokeStyle = 'rgba(255,255,255,0.3)';
@@ -441,20 +533,26 @@ function setupFullscreenTooltip() {
         const dataIdx = view.startIdx + nearestIdx;
         const rows = [`<div style="color:#9ca3af; margin-bottom:4px;">${fmtTime(view.xs[nearestIdx])}</div>`];
         const pointLegends = seriesData.legends[dataIdx] || [];
+
         for (let j = 0; j < pointLegends.length; j++) {
             if (hiddenSeries[name]?.[j]) continue;
             const legend = pointLegends[j];
-            const v = seriesData.values[dataIdx]?.[j] || 0;
+            const v = seriesData.values[dataIdx]?.[j];
+
+            if (v === undefined || v === null || isNaN(v)) continue;
+
             const yPos = meta.topPad + (meta.h - meta.topPad - meta.bottomPad) - (v - meta.minY) * yScale;
             ctx.fillStyle = legend.color;
             ctx.beginPath();
             ctx.arc(nearestXPos, yPos, 5, 0, Math.PI * 2);
             ctx.fill();
+
             let formattedValue = formatValue(v, seriesData.format);
             let displayText = `<span style="color:${legend.color};">${legend.name}</span>: ${formattedValue}`;
             if (legend.comment) displayText += ` <span style="color:#9ca3af; font-size:11px;">(${legend.comment})</span>`;
             rows.push(`<div style="margin:2px 0;">${displayText}</div>`);
         }
+
         tooltip.innerHTML = rows.join('');
         tooltip.style.display = 'block';
         const tx = e.clientX + 14;
@@ -475,6 +573,14 @@ function pushDataPoint(rpcSnapshot) {
     if (typeof ts !== 'number') return;
 
     const last = data.xs.length ? data.xs[data.xs.length - 1] : 0;
+
+    if (minTimestamp === null || ts < minTimestamp) {
+        minTimestamp = ts;
+    }
+    if (maxTimestamp === null || ts > maxTimestamp) {
+        maxTimestamp = ts;
+    }
+
     if (ts <= last) return;
 
     data.xs.push(ts);
@@ -502,6 +608,10 @@ function pushDataPoint(rpcSnapshot) {
             data.series[name].values.splice(0, drop);
             data.series[name].legends.splice(0, drop);
         });
+
+        if (data.xs.length > 0) {
+            minTimestamp = data.xs[0];
+        }
     }
 
     updateEndSlider();
@@ -509,15 +619,21 @@ function pushDataPoint(rpcSnapshot) {
 
 function resetData() {
     data = { xs: [], series: {} };
+    minTimestamp = null;
+    maxTimestamp = null;
 }
 
 function getCurrentView() {
     if (data.xs.length === 0) return null;
 
-    const endTs = followLive ? data.xs[data.xs.length - 1] : (pausedEndTs ?? data.xs[data.xs.length - 1]);
-    const startTs = windowMs === 0 ? data.xs[0] : Math.max(data.xs[0], endTs - windowMs);
+    const globalMin = minTimestamp !== null ? minTimestamp : data.xs[0];
+    const globalMax = maxTimestamp !== null ? maxTimestamp : data.xs[data.xs.length - 1];
+
+    const endTs = followLive ? globalMax : (pausedEndTs ?? globalMax);
+    const startTs = windowMs === 0 ? globalMin : Math.max(globalMin, endTs - windowMs);
 
     windowStartMs = startTs;
+
     let startIdx = 0;
     let endIdx = data.xs.length - 1;
 
@@ -541,13 +657,41 @@ function getCurrentView() {
         startIdx,
         endIdx,
         startTs,
-        endTs
+        endTs,
+        globalMin,
+        globalMax
     };
+}
+
+function drawEmptyChart(canvas, message) {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+
+    ctx.fillStyle = '#0f1626';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.fillStyle = '#9ca3af';
+    ctx.font = '12px ui-monospace, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(message || 'No data', w / 2, h / 2);
 }
 
 function drawAllCharts() {
     const view = getCurrentView();
-    if (!view || view.xs.length === 0) return;
+
+    drawTimeline();
+
+    if (!view || view.xs.length === 0) {
+
+        Object.keys(data.series).forEach(name => {
+            const canvas = document.getElementById(`chart-${name}`);
+            if (canvas) {
+                drawEmptyChart(canvas, 'No data');
+            }
+        });
+        return;
+    }
 
     lastView = view;
 
@@ -571,10 +715,57 @@ function drawAllCharts() {
             maxLines = Math.max(maxLines, values.length);
         }
 
+        let hasAnyDataInSeries = false;
+
         for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
             if (hiddenSeries[name]?.[lineIdx]) continue;
 
-            const ys = [];
+            const segments = [];
+            let currentSegment = { xs: [], ys: [], valid: false };
+            let hasAnyData = false;
+
+            for (let j = view.startIdx; j < view.endIdx; j++) {
+                const value = seriesData.values[j]?.[lineIdx];
+                const ts = view.xs[j - view.startIdx];
+
+                if (value !== undefined && value !== null && !isNaN(value)) {
+                    hasAnyData = true;
+                    hasAnyDataInSeries = true;
+
+                    if (!currentSegment.valid) {
+
+                        currentSegment = { xs: [ts], ys: [value], valid: true };
+                    } else {
+
+                        const lastTs = currentSegment.xs[currentSegment.xs.length - 1];
+                        if (ts - lastTs < 5000) {
+                            currentSegment.xs.push(ts);
+                            currentSegment.ys.push(value);
+                        } else {
+
+                            if (currentSegment.xs.length > 1) {
+                                segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
+                            }
+                            currentSegment = { xs: [ts], ys: [value], valid: true };
+                        }
+                    }
+                } else {
+                    if (currentSegment.valid) {
+
+                        if (currentSegment.xs.length > 1) {
+                            segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
+                        }
+                        currentSegment = { xs: [], ys: [], valid: false };
+                    }
+                }
+            }
+
+            if (currentSegment.valid && currentSegment.xs.length > 1) {
+                segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
+            }
+
+            if (!hasAnyData) continue;
+
             let color = '#888';
             for (let i = view.endIdx - 1; i >= view.startIdx; i--) {
                 const legends = seriesData.legends[i] || [];
@@ -583,27 +774,36 @@ function drawAllCharts() {
                     break;
                 }
             }
-            
-            for (let j = view.startIdx; j < view.endIdx; j++) {
-                ys.push(seriesData.values[j]?.[lineIdx] || 0);
-            }
-            
-            seriesList.push({
-                ys: ys,
-                color: color,
-                lineWidth: maxLines > 8 ? 1 : 2,
-                lineIdx: lineIdx
+
+            segments.forEach(segment => {
+                seriesList.push({
+                    ys: segment.ys,
+                    xs: segment.xs,
+                    color: color,
+                    lineWidth: maxLines > 8 ? 1 : 2,
+                    lineIdx: lineIdx
+                });
             });
+        }
+
+        if (!hasAnyDataInSeries) {
+            drawEmptyChart(canvas, 'No data in range');
+            return;
         }
 
         let minY = 0;
         let maxY = 100;
 
         if (seriesData.format) {
-            if (seriesData.format.type === 'Bytes') {
-                maxY = Math.max(1, ...seriesList.flatMap(s => s.ys)) * 1.1;
-            } else if (seriesData.format.type !== 'Percentage') {
-                maxY = Math.max(1, ...seriesList.flatMap(s => s.ys)) * 1.1;
+            const allYs = seriesList.flatMap(s => s.ys).filter(y => isFinite(y) && !isNaN(y));
+            if (allYs.length > 0) {
+                if (seriesData.format.type === 'Bytes') {
+                    maxY = Math.max(1, ...allYs) * 1.1;
+                } else if (seriesData.format.type !== 'Percentage') {
+                    maxY = Math.max(1, ...allYs) * 1.1;
+                } else {
+                    maxY = 100;
+                }
             }
         }
 
@@ -621,16 +821,24 @@ function drawAllCharts() {
     });
 
     updateRangeLabel(view);
-    drawTimeline();
 }
 
-function drawLineChart(canvas, series, options) {
+function drawLineChart(canvas, seriesSegments, options) {
     const ctx = canvas.getContext('2d');
     const w = canvas.width, h = canvas.height;
     ctx.clearRect(0, 0, w, h);
 
     ctx.fillStyle = '#0f1626';
     ctx.fillRect(0, 0, w, h);
+
+    if (seriesSegments.length === 0) {
+        ctx.fillStyle = '#9ca3af';
+        ctx.font = '12px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('No data in range', w / 2, h / 2);
+        return;
+    }
 
     ctx.strokeStyle = '#1c2740';
     ctx.lineWidth = 1;
@@ -783,24 +991,24 @@ function drawLineChart(canvas, series, options) {
         ctx.fillText(txt, px - 25, h - 6);
     }
 
-    for (const s of series) {
-        ctx.strokeStyle = s.color;
-        ctx.lineWidth = s.lineWidth || 2;
+    for (const segment of seriesSegments) {
+        if (segment.xs.length < 2) continue;
+
+        ctx.strokeStyle = segment.color;
+        ctx.lineWidth = segment.lineWidth || 2;
         ctx.beginPath();
-        
-        if (s.ys.length > 0) {
-            ctx.moveTo(xToPx(xs[0]), yToPx(s.ys[0]));
-            for (let i = 1; i < xs.length; i++) {
-                ctx.lineTo(xToPx(xs[i]), yToPx(s.ys[i]));
-            }
+
+        ctx.moveTo(xToPx(segment.xs[0]), yToPx(segment.ys[0]));
+        for (let i = 1; i < segment.xs.length; i++) {
+            ctx.lineTo(xToPx(segment.xs[i]), yToPx(segment.ys[i]));
         }
         ctx.stroke();
 
         if (xs.length < 200) {
-            ctx.fillStyle = s.color;
-            for (let i = 0; i < xs.length; i++) {
+            ctx.fillStyle = segment.color;
+            for (let i = 0; i < segment.xs.length; i++) {
                 ctx.beginPath();
-                ctx.arc(xToPx(xs[i]), yToPx(s.ys[i]), 2, 0, Math.PI * 2);
+                ctx.arc(xToPx(segment.xs[i]), yToPx(segment.ys[i]), 2, 0, Math.PI * 2);
                 ctx.fill();
             }
         }
@@ -822,33 +1030,44 @@ function drawTimeline() {
     ctx.fillStyle = '#0f1626';
     ctx.fillRect(0, 0, w, h);
 
-    const minX = data.xs[0];
-    const maxX = data.xs[data.xs.length - 1];
+    const globalMin = minTimestamp !== null ? minTimestamp : data.xs[0];
+    const globalMax = maxTimestamp !== null ? maxTimestamp : data.xs[data.xs.length - 1];
     const pad = 0;
     const timeLabelArea = 35;
 
     if (data.series['cpu_total'] && data.series['cpu_total'].values.length > 0) {
         ctx.strokeStyle = 'rgba(196, 68, 68, 0.5)';
         ctx.lineWidth = 1;
-        ctx.beginPath();
 
-        const step = Math.max(1, Math.floor(data.xs.length / 200));
-        let first = true;
+        let inSegment = false;
 
-        for (let i = 0; i < data.xs.length; i += step) {
-            const x = pad + ((data.xs[i] - minX) / (maxX - minX)) * (w - 2 * pad);
+        for (let i = 0; i < data.xs.length; i++) {
+            const value = data.series['cpu_total'].values[i]?.[0];
+            const x = pad + ((data.xs[i] - globalMin) / (globalMax - globalMin)) * (w - 2 * pad);
             const chartTop = 14;
             const chartBot = h - timeLabelArea - 4;
-            const y = chartTop + (1 - (data.series['cpu_total'].values[i][0] || 0) / 100) * (chartBot - chartTop);
 
-            if (first) {
-                ctx.moveTo(x, y);
-                first = false;
+            if (value !== undefined && value !== null && !isNaN(value)) {
+                const y = chartTop + (1 - value / 100) * (chartBot - chartTop);
+
+                if (!inSegment) {
+                    ctx.beginPath();
+                    ctx.moveTo(x, y);
+                    inSegment = true;
+                } else {
+                    ctx.lineTo(x, y);
+                }
             } else {
-                ctx.lineTo(x, y);
+                if (inSegment) {
+                    ctx.stroke();
+                    inSegment = false;
+                }
             }
         }
-        ctx.stroke();
+
+        if (inSegment) {
+            ctx.stroke();
+        }
     }
 
     ctx.strokeStyle = '#2a3550';
@@ -857,9 +1076,10 @@ function drawTimeline() {
     ctx.moveTo(pad, h - timeLabelArea);
     ctx.lineTo(w - pad, h - timeLabelArea);
     ctx.stroke();
-    if (windowMs > 0 && windowStartMs) {
-        const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (w - 2 * pad);
-        const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (w - 2 * pad);
+
+    if (windowMs > 0 && windowStartMs !== null) {
+        const x0 = pad + ((windowStartMs - globalMin) / (globalMax - globalMin)) * (w - 2 * pad);
+        const x1 = pad + ((windowStartMs + windowMs - globalMin) / (globalMax - globalMin)) * (w - 2 * pad);
 
         const clampedX0 = Math.max(pad, Math.min(w - pad, x0));
         const clampedX1 = Math.max(pad, Math.min(w - pad, x1));
@@ -896,11 +1116,11 @@ function drawTimeline() {
     ctx.font = '10px ui-monospace, monospace';
     ctx.fillStyle = '#9ca3af';
     ctx.textBaseline = 'top';
-    
+
     const timeLabels = 8;
     for (let i = 0; i <= timeLabels; i++) {
         const x = pad + (i / timeLabels) * (w - 2 * pad);
-        const time = minX + (i / timeLabels) * (maxX - minX);
+        const time = globalMin + (i / timeLabels) * (globalMax - globalMin);
         const timeStr = fmtTime(time);
 
         ctx.strokeStyle = '#2a3550';
@@ -922,30 +1142,31 @@ function drawTimeline() {
 
     const chartMidY = Math.round((h - timeLabelArea) / 2);
 
-    if (windowMs > 0 && windowStartMs) {
-        const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (w - 2 * pad);
-        const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (w - 2 * pad);
+    if (windowMs > 0 && windowStartMs !== null) {
+        const x0 = pad + ((windowStartMs - globalMin) / (globalMax - globalMin)) * (w - 2 * pad);
+        const x1 = pad + ((windowStartMs + windowMs - globalMin) / (globalMax - globalMin)) * (w - 2 * pad);
 
         const clampedX0 = Math.max(pad, Math.min(w - pad, x0));
         const clampedX1 = Math.max(pad, Math.min(w - pad, x1));
-        ctx.font = 'bold 12px ui-monospace, monospace';
-        ctx.fillStyle = '#e0f2fe';
-        ctx.textBaseline = 'middle';
 
-        ctx.textAlign = 'left';
-        ctx.fillText(fmtTime(windowStartMs), clampedX0 + 4, chartMidY);
-        ctx.textAlign = 'right';
-        ctx.fillText(fmtTime(windowStartMs + windowMs), clampedX1 - 4, chartMidY);
+        if (clampedX1 > clampedX0 + 20) {
+            ctx.font = 'bold 12px ui-monospace, monospace';
+            ctx.fillStyle = '#e0f2fe';
+            ctx.textBaseline = 'middle';
+
+            ctx.textAlign = 'left';
+            ctx.fillText(fmtTime(windowStartMs), clampedX0 + 4, chartMidY);
+            ctx.textAlign = 'right';
+            ctx.fillText(fmtTime(windowStartMs + windowMs), clampedX1 - 4, chartMidY);
+        }
     }
 
     if (selectionStart !== null && selectionEnd !== null && selectionEnd - selectionStart > 20) {
         const xStart = Math.max(pad, Math.min(w - pad, Math.min(selectionStart, selectionEnd)));
         const xEnd = Math.max(pad, Math.min(w - pad, Math.max(selectionStart, selectionEnd)));
-        const minX = data.xs[0];
-        const maxX = data.xs[data.xs.length - 1];
 
-        const timeStart = minX + ((xStart - pad) / (w - 2 * pad)) * (maxX - minX);
-        const timeEnd = minX + ((xEnd - pad) / (w - 2 * pad)) * (maxX - minX);
+        const timeStart = globalMin + ((xStart - pad) / (w - 2 * pad)) * (globalMax - globalMin);
+        const timeEnd = globalMin + ((xEnd - pad) / (w - 2 * pad)) * (globalMax - globalMin);
 
         ctx.font = 'bold 12px ui-monospace, monospace';
         ctx.fillStyle = '#fce7f3';
@@ -990,17 +1211,17 @@ function setupChartHandlers() {
         const baseCanvas = chartDiv.querySelector('canvas:not(.overlay)');
         const overlayCanvas = chartDiv.querySelector('canvas.overlay');
         if (!baseCanvas || !overlayCanvas) return;
-        
+
         const seriesName = baseCanvas.id.replace('chart-', '');
-        
+
         function clearTooltip() {
             const ctx = overlayCanvas.getContext('2d');
             ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
             tooltip.style.display = 'none';
         }
-        
+
         baseCanvas.addEventListener('mouseleave', clearTooltip);
-        
+
         baseCanvas.addEventListener('mousemove', (e) => {
             if (!lastView || !baseCanvas.__meta) return;
 
@@ -1016,26 +1237,35 @@ function setupChartHandlers() {
             }
 
             const xs = lastView.xs;
-            const xPositions = [];
+            const seriesData = lastView.series[seriesName];
+            if (!seriesData) return;
+
+            let nearestIdx = -1;
+            let minDist = Infinity;
 
             for (let i = 0; i < xs.length; i++) {
+                const dataIdx = i + meta.startIdx;
+                const hasData = seriesData.values[dataIdx]?.some(v => v !== undefined && v !== null && !isNaN(v));
+
+                if (!hasData) continue;
+
                 const timeRatio = (xs[i] - meta.minX) / (meta.maxX - meta.minX);
                 const xPos = meta.leftPad + timeRatio * (meta.w - meta.leftPad - meta.rightPad);
-                xPositions.push(xPos);
-            }
+                const dist = Math.abs(xPos - mouseCanvasX);
 
-            let nearestIdx = 0;
-            let minDist = Math.abs(xPositions[0] - mouseCanvasX);
-
-            for (let i = 1; i < xPositions.length; i++) {
-                const dist = Math.abs(xPositions[i] - mouseCanvasX);
                 if (dist < minDist) {
                     minDist = dist;
                     nearestIdx = i;
                 }
             }
 
-            const nearestXPos = xPositions[nearestIdx];
+            if (nearestIdx === -1 || minDist > 40) {
+                clearTooltip();
+                return;
+            }
+
+            const timeRatio = (xs[nearestIdx] - meta.minX) / (meta.maxX - meta.minX);
+            const nearestXPos = meta.leftPad + timeRatio * (meta.w - meta.leftPad - meta.rightPad);
             const dataIdx = nearestIdx + meta.startIdx;
 
             const ctx = overlayCanvas.getContext('2d');
@@ -1048,54 +1278,17 @@ function setupChartHandlers() {
             ctx.lineTo(nearestXPos, overlayCanvas.height);
             ctx.stroke();
 
-            if (selectionStart !== null && selectionEnd !== null) {
-                const rect = document.getElementById('timeline').getBoundingClientRect();
-                const pad = 0;
-
-                ctx.strokeStyle = '#ec4899';
-                ctx.lineWidth = 1;
-                ctx.setLineDash([5, 5]);
-
-                const minX = meta.minX;
-                const maxX = meta.maxX;
-
-                const xStart = Math.min(selectionStart, selectionEnd);
-                const xEnd = Math.max(selectionStart, selectionEnd);
-
-                const timeStart = minX + ((xStart - pad) / (rect.width - 2 * pad)) * (maxX - minX);
-                const timeEnd = minX + ((xEnd - pad) / (rect.width - 2 * pad)) * (maxX - minX);
-
-                if (timeStart >= meta.minX && timeStart <= meta.maxX) {
-                    const xPosStart = meta.leftPad + ((timeStart - meta.minX) / (meta.maxX - meta.minX)) * (meta.w - meta.leftPad - meta.rightPad);
-                    ctx.beginPath();
-                    ctx.moveTo(xPosStart, 0);
-                    ctx.lineTo(xPosStart, overlayCanvas.height);
-                    ctx.stroke();
-                }
-
-                if (timeEnd >= meta.minX && timeEnd <= meta.maxX) {
-                    const xPosEnd = meta.leftPad + ((timeEnd - meta.minX) / (meta.maxX - meta.minX)) * (meta.w - meta.leftPad - meta.rightPad);
-                    ctx.beginPath();
-                    ctx.moveTo(xPosEnd, 0);
-                    ctx.lineTo(xPosEnd, overlayCanvas.height);
-                    ctx.stroke();
-                }
-
-                ctx.setLineDash([]);
-            }
-
-            const seriesData = lastView.series[seriesName];
-            if (!seriesData) return;
-
             const rows = [`<div style="color:#9ca3af; margin-bottom: 4px;">${fmtTime(xs[nearestIdx])}</div>`];
 
             const pointLegends = seriesData.legends[dataIdx] || [];
-            
+
             for (let j = 0; j < pointLegends.length; j++) {
                 if (hiddenSeries[seriesName]?.[j]) continue;
-                
+
                 const legend = pointLegends[j];
-                const v = seriesData.values[dataIdx]?.[j] || 0;
+                const v = seriesData.values[dataIdx]?.[j];
+
+                if (v === undefined || v === null || isNaN(v)) continue;
 
                 const valueRatio = (v - meta.minY) / (meta.maxY - meta.minY);
                 const yPos = meta.topPad + (meta.h - meta.topPad - meta.bottomPad) - 
@@ -1105,7 +1298,7 @@ function setupChartHandlers() {
                 ctx.beginPath();
                 ctx.arc(nearestXPos, yPos, 5, 0, Math.PI * 2);
                 ctx.fill();
-                
+
                 ctx.strokeStyle = '#ffffff';
                 ctx.lineWidth = 2;
                 ctx.beginPath();
@@ -1113,28 +1306,31 @@ function setupChartHandlers() {
                 ctx.stroke();
 
                 let formattedValue = formatValue(v, seriesData.format);
-
                 let displayText = `<span style="color:${legend.color};">${legend.name}</span>: ${formattedValue}`;
                 if (legend.comment) {
                     displayText += ` <span style="color:#9ca3af; font-size: 11px;">(${legend.comment})</span>`;
                 }
-                
+
                 rows.push(`<div style="margin: 2px 0;">${displayText}</div>`);
             }
-            
-            tooltip.innerHTML = rows.join('');
-            tooltip.style.display = 'block';
 
-            const tw = tooltip.offsetWidth;
-            const th = tooltip.offsetHeight;
-            let left = e.clientX + 12;
-            let top = e.clientY + 12;
+            if (rows.length > 1) {
+                tooltip.innerHTML = rows.join('');
+                tooltip.style.display = 'block';
 
-            if (left + tw > window.innerWidth - 8) left = e.clientX - tw - 12;
-            if (top + th > window.innerHeight - 8) top = e.clientY - th - 12;
+                const tw = tooltip.offsetWidth;
+                const th = tooltip.offsetHeight;
+                let left = e.clientX + 12;
+                let top = e.clientY + 12;
 
-            tooltip.style.left = left + 'px';
-            tooltip.style.top = top + 'px';
+                if (left + tw > window.innerWidth - 8) left = e.clientX - tw - 12;
+                if (top + th > window.innerHeight - 8) top = e.clientY - th - 12;
+
+                tooltip.style.left = left + 'px';
+                tooltip.style.top = top + 'px';
+            } else {
+                tooltip.style.display = 'none';
+            }
         });
     });
 }
@@ -1156,11 +1352,12 @@ function setupTimelineDrag() {
 
         const clampedX = Math.max(pad, Math.min(rect.width - pad, x));
 
-        if (windowMs > 0 && windowStartMs) {
-            const minX = data.xs[0];
-            const maxX = data.xs[data.xs.length - 1];
-            const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
-            const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
+        const globalMin = minTimestamp !== null ? minTimestamp : data.xs[0];
+        const globalMax = maxTimestamp !== null ? maxTimestamp : data.xs[data.xs.length - 1];
+
+        if (windowMs > 0 && windowStartMs !== null) {
+            const x0 = pad + ((windowStartMs - globalMin) / (globalMax - globalMin)) * (rect.width - 2 * pad);
+            const x1 = pad + ((windowStartMs + windowMs - globalMin) / (globalMax - globalMin)) * (rect.width - 2 * pad);
 
             const edgeSize = 8;
             if (Math.abs(clampedX - x0) < edgeSize) {
@@ -1170,6 +1367,7 @@ function setupTimelineDrag() {
                 initialWindowStart = windowStartMs;
                 initialWindowMs = windowMs;
                 tl.style.cursor = 'ew-resize';
+                isDraggingActive = true;
                 return;
             } else if (Math.abs(clampedX - x1) < edgeSize) {
                 isDraggingWindow = true;
@@ -1178,6 +1376,7 @@ function setupTimelineDrag() {
                 initialWindowStart = windowStartMs;
                 initialWindowMs = windowMs;
                 tl.style.cursor = 'ew-resize';
+                isDraggingActive = true;
                 return;
             } else if (clampedX >= x0 && clampedX <= x1) {
                 isDraggingWindow = true;
@@ -1185,6 +1384,7 @@ function setupTimelineDrag() {
                 dragStartX = clampedX;
                 initialWindowStart = windowStartMs;
                 tl.style.cursor = 'grabbing';
+                isDraggingActive = true;
                 return;
             }
         }
@@ -1193,20 +1393,22 @@ function setupTimelineDrag() {
         selectionStart = clampedX;
         selectionEnd = clampedX;
         tl.style.cursor = 'crosshair';
+        isDraggingActive = true;
     });
 
     window.addEventListener('mousemove', (e) => {
-        if (!isDraggingWindow && !isSelecting) {
-            if (data.xs.length >= 2 && windowMs > 0 && windowStartMs) {
+        if (!isDraggingActive) {
+            if (data.xs.length >= 2 && windowMs > 0 && windowStartMs !== null) {
                 const rect = tl.getBoundingClientRect();
                 const x = e.clientX - rect.left;
                 const pad = 0;
-                
-                const minX = data.xs[0];
-                const maxX = data.xs[data.xs.length - 1];
-                const x0 = pad + ((windowStartMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
-                const x1 = pad + ((windowStartMs + windowMs - minX) / (maxX - minX)) * (rect.width - 2 * pad);
-                
+
+                const globalMin = minTimestamp !== null ? minTimestamp : data.xs[0];
+                const globalMax = maxTimestamp !== null ? maxTimestamp : data.xs[data.xs.length - 1];
+
+                const x0 = pad + ((windowStartMs - globalMin) / (globalMax - globalMin)) * (rect.width - 2 * pad);
+                const x1 = pad + ((windowStartMs + windowMs - globalMin) / (globalMax - globalMin)) * (rect.width - 2 * pad);
+
                 const edgeSize = 8;
                 if (Math.abs(x - x0) < edgeSize || Math.abs(x - x1) < edgeSize) {
                     tl.style.cursor = 'ew-resize';
@@ -1218,7 +1420,7 @@ function setupTimelineDrag() {
             }
             return;
         }
-        
+
         if (data.xs.length < 2) return;
 
         const rect = tl.getBoundingClientRect();
@@ -1226,46 +1428,48 @@ function setupTimelineDrag() {
         const pad = 0;
         const clampedX = Math.max(pad, Math.min(rect.width - pad, currentX));
 
+        const globalMin = minTimestamp !== null ? minTimestamp : data.xs[0];
+        const globalMax = maxTimestamp !== null ? maxTimestamp : data.xs[data.xs.length - 1];
+        const timeRange = globalMax - globalMin;
+
         if (isDraggingWindow) {
-            const minX = data.xs[0];
-            const maxX = data.xs[data.xs.length - 1];
-            const timeRange = maxX - minX;
-            
+
             if (isResizingLeft) {
                 const deltaX = dragStartX - clampedX;
                 const deltaRatio = deltaX / (rect.width - 2 * pad);
                 const deltaTime = deltaRatio * timeRange;
-                
+
                 let newStart = initialWindowStart - deltaTime;
                 let newEnd = initialWindowStart + initialWindowMs;
-                
-                newStart = clamp(newStart, minX, newEnd - 60000);
+
+                newStart = clamp(newStart, globalMin, newEnd - 60000);
                 windowMs = newEnd - newStart;
                 windowStartMs = newStart;
             } else if (isResizingRight) {
                 const deltaX = clampedX - dragStartX;
                 const deltaRatio = deltaX / (rect.width - 2 * pad);
                 const deltaTime = deltaRatio * timeRange;
-                
+
                 let newEnd = initialWindowStart + initialWindowMs + deltaTime;
-                newEnd = clamp(newEnd, initialWindowStart + 60000, maxX);
+                newEnd = clamp(newEnd, initialWindowStart + 60000, globalMax);
                 windowMs = newEnd - initialWindowStart;
                 windowStartMs = initialWindowStart;
             } else if (isMoving) {
                 const deltaX = clampedX - dragStartX;
                 const deltaRatio = deltaX / (rect.width - 2 * pad);
-                
+
                 let newStart = initialWindowStart + deltaRatio * timeRange;
-                newStart = clamp(newStart, minX, maxX - windowMs);
+                newStart = clamp(newStart, globalMin, globalMax - windowMs);
                 windowStartMs = newStart;
             }
-            
+
             pausedEndTs = windowStartMs + windowMs;
-            followLive = (pausedEndTs >= maxX - 1000);
-            
+            followLive = (pausedEndTs >= globalMax - 1000);
+
             updateEndSlider();
+            drawTimeline();
             drawAllCharts();
-            
+
         } else if (isSelecting && selectionStart !== null) {
             selectionEnd = clampedX;
             drawTimeline();
@@ -1281,6 +1485,8 @@ function setupTimelineDrag() {
     });
 
     window.addEventListener('mouseup', () => {
+        if (!isDraggingActive) return;
+
         if (isSelecting && selectionStart !== null && selectionEnd !== null) {
             const rect = tl.getBoundingClientRect();
             const pad = 0;
@@ -1290,6 +1496,9 @@ function setupTimelineDrag() {
 
             const rightEdge = rect.width - pad;
             const reachedLive = Math.abs(xEnd - rightEdge) < 10;
+
+            const globalMin = minTimestamp !== null ? minTimestamp : data.xs[0];
+            const globalMax = maxTimestamp !== null ? maxTimestamp : data.xs[data.xs.length - 1];
 
             if (reachedLive) {
                 followLive = true;
@@ -1314,11 +1523,8 @@ function setupTimelineDrag() {
                 drawAllCharts();
                 showNotification('Switched to live mode');
             } else if (xEnd - xStart > 5) {
-                const minX = data.xs[0];
-                const maxX = data.xs[data.xs.length - 1];
-
-                const timeStart = minX + ((xStart - pad) / (rect.width - 2 * pad)) * (maxX - minX);
-                const timeEnd = minX + ((xEnd - pad) / (rect.width - 2 * pad)) * (maxX - minX);
+                const timeStart = globalMin + ((xStart - pad) / (rect.width - 2 * pad)) * (globalMax - globalMin);
+                const timeEnd = globalMin + ((xEnd - pad) / (rect.width - 2 * pad)) * (globalMax - globalMin);
 
                 windowMs = timeEnd - timeStart;
                 windowStartMs = timeStart;
@@ -1327,7 +1533,7 @@ function setupTimelineDrag() {
 
                 const winSlider = document.getElementById('win-slider');
                 const winLabel = document.getElementById('win-slider-label');
-                
+
                 if (windowMs >= 60000) {
                     const mins = Math.round(windowMs / 60000);
                     winSlider.value = Math.min(60, Math.max(1, mins));
@@ -1345,22 +1551,20 @@ function setupTimelineDrag() {
                 const durationSec = Math.round(windowMs / 1000);
                 const durationMin = Math.floor(durationSec / 60);
                 const durationRemSec = durationSec % 60;
-                
+
                 if (durationMin > 0) {
                     showNotification(`Selected range: ${durationMin}m ${durationRemSec}s (${fmtTime(timeStart)} - ${fmtTime(timeEnd)})`);
                 } else {
                     showNotification(`Selected range: ${durationSec}s (${fmtTime(timeStart)} - ${fmtTime(timeEnd)})`);
                 }
             } else {
-                if (windowMs > 0 && windowStartMs) {
-                    const minX = data.xs[0];
-                    const maxX = data.xs[data.xs.length - 1];
-                    const clickTime = minX + ((xStart - pad) / (rect.width - 2 * pad)) * (maxX - minX);
-                    
-                    windowStartMs = clamp(clickTime - windowMs/2, minX, maxX - windowMs);
+                if (windowMs > 0 && windowStartMs !== null) {
+                    const clickTime = globalMin + ((xStart - pad) / (rect.width - 2 * pad)) * (globalMax - globalMin);
+
+                    windowStartMs = clamp(clickTime - windowMs/2, globalMin, globalMax - windowMs);
                     pausedEndTs = windowStartMs + windowMs;
                     followLive = false;
-                    
+
                     updateEndSlider();
                     drawAllCharts();
                 }
@@ -1372,6 +1576,7 @@ function setupTimelineDrag() {
         isResizingLeft = false;
         isResizingRight = false;
         isMoving = false;
+        isDraggingActive = false;
         selectionStart = null;
         selectionEnd = null;
         tl.style.cursor = 'default';
@@ -1382,19 +1587,19 @@ function setupTimelineDrag() {
         followLive = true;
         pausedEndTs = null;
         windowStartMs = null;
-        
+
         const winSlider = document.getElementById('win-slider');
         const winLabel = document.getElementById('win-slider-label');
         winSlider.value = '3';
         winLabel.textContent = '3m';
         windowMs = 180000;
-        
+
         document.querySelectorAll('button[data-win]').forEach(b => b.classList.remove('active'));
         document.querySelector('button[data-win="180000"]')?.classList.add('active');
-        
+
         updateEndSlider();
         drawAllCharts();
-        
+
         showNotification('Returned to live mode');
     });
 }
@@ -1426,14 +1631,14 @@ function showNotification(message, duration = 3000) {
         `;
         document.body.appendChild(notification);
     }
-    
+
     notification.textContent = message;
     notification.style.opacity = '1';
-    
+
     if (window.notificationTimeout) {
         clearTimeout(window.notificationTimeout);
     }
-    
+
     window.notificationTimeout = setTimeout(() => {
         notification.style.opacity = '0';
     }, duration);
@@ -1441,11 +1646,13 @@ function showNotification(message, duration = 3000) {
 
 function updateRangeLabel(view) {
     const label = document.getElementById('range-label');
+    if (!label) return;
+
     const duration = (view.endTs - view.startTs) / 1000;
     const hours = Math.floor(duration / 3600);
     const minutes = Math.floor((duration % 3600) / 60);
     const seconds = Math.floor(duration % 60);
-    
+
     let durationStr = '';
     if (hours > 0) {
         durationStr = `${hours}h ${minutes}m ${seconds}s`;
@@ -1454,7 +1661,7 @@ function updateRangeLabel(view) {
     } else {
         durationStr = `${seconds}s`;
     }
-    
+
     if (windowMs === 0) {
         label.textContent = `All data: ${fmtTime(view.startTs)} - ${fmtTime(view.endTs)} (${durationStr})`;
     } else {
@@ -1462,50 +1669,105 @@ function updateRangeLabel(view) {
     }
 }
 
-async function fetchHistory() {
+async function fetchInitialData() {
     try {
-        const res = await fetch('/api/history?limit=10000');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const latestRes = await fetch('/api/latest');
+        if (!latestRes.ok) throw new Error('Failed to fetch latest');
 
-        const hist = await res.json();
+        const latest = await latestRes.json();
+
+        const dbStatsRes = await fetch('/api/db/stats');
+        let fromTs = 0;
+        let toTs = Date.now() * 1000;
+
+        if (dbStatsRes.ok) {
+            const stats = await dbStatsRes.json();
+            if (stats.oldest_timestamp) {
+                fromTs = stats.oldest_timestamp;
+            }
+            if (stats.newest_timestamp) {
+                toTs = stats.newest_timestamp;
+            }
+        }
+
+        const rangeRes = await fetch(`/api/range?from_ts=${fromTs}&to_ts=${toTs}&limit=10000`);
+        if (!rangeRes.ok) throw new Error('Failed to fetch range');
+
+        const history = await rangeRes.json();
+
         resetData();
 
-        if (Array.isArray(hist) && hist.length > 0) {
-            hist.forEach(p => pushDataPoint(p));
-            if (hist.length > 0) {
-                createChartsFromSnapshot(hist[hist.length - 1]);
+        if (Array.isArray(history) && history.length > 0) {
+            history.sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+
+            history.forEach(p => pushDataPoint(p));
+
+            if (history.length > 0) {
+                createChartsFromSnapshot(history[history.length - 1]);
             }
+        } else if (latest && latest.data) {
+            createChartsFromSnapshot(latest);
+            pushDataPoint(latest);
         }
 
         drawAllCharts();
     } catch (e) {
         console.error('Fetch error:', e);
+        try {
+            const res = await fetch('/api/history?limit=10000');
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+
+            const hist = await res.json();
+            resetData();
+
+            if (Array.isArray(hist) && hist.length > 0) {
+                hist.sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+                hist.forEach(p => pushDataPoint(p));
+                if (hist.length > 0) {
+                    createChartsFromSnapshot(hist[hist.length - 1]);
+                }
+            }
+
+            drawAllCharts();
+        } catch (fallbackError) {
+            console.error('Fallback fetch error:', fallbackError);
+        }
     }
 }
 
-function startStream() {
-    const es = new EventSource('/api/stream');
+function updateEndSlider() {
+    const endSlider = document.getElementById('end-slider');
+    const endLabel = document.getElementById('end-slider-label');
 
-    es.onmessage = (ev) => {
-        try {
-            const p = JSON.parse(ev.data);
-            document.getElementById('latest').textContent = JSON.stringify(p, null, 2);
-            
-            if (data.xs.length === 0) {
-                createChartsFromSnapshot(p);
+    if (data.xs.length < 2) return;
+
+    const globalMin = minTimestamp !== null ? minTimestamp : data.xs[0];
+    const globalMax = maxTimestamp !== null ? maxTimestamp : data.xs[data.xs.length - 1];
+    const totalSeconds = Math.floor((globalMax - globalMin) / 1000);
+
+    endSlider.max = totalSeconds;
+
+    if (followLive) {
+        endSlider.value = totalSeconds;
+        endLabel.textContent = 'live';
+    } else if (pausedEndTs) {
+        const seconds = Math.floor((pausedEndTs - globalMin) / 1000);
+        endSlider.value = clamp(seconds, 0, totalSeconds);
+
+        const behindSeconds = Math.floor((globalMax - pausedEndTs) / 1000);
+
+        if (behindSeconds < 60) {
+            endLabel.textContent = `${behindSeconds}s behind`;
+        } else {
+            const behindMinutes = Math.floor(behindSeconds / 60);
+            const remainingSeconds = behindSeconds % 60;
+            if (remainingSeconds === 0) {
+                endLabel.textContent = `${behindMinutes}m behind`;
+            } else {
+                endLabel.textContent = `${behindMinutes}m ${remainingSeconds}s behind`;
             }
-
-            pushDataPoint(p);
-            updateStatCards(p);
-
-            if (followLive) {
-                drawAllCharts();
-                if (fullscreenName) drawFullscreenChart();
-            }
-        } catch (e) {
-            console.error('Stream error:', e);
         }
-    };
+    }
 }
 
 function initWindowButtons() {
@@ -1566,9 +1828,10 @@ function initSliders() {
 
         followLive = (val === max);
 
+        const globalMin = minTimestamp !== null ? minTimestamp : data.xs[0];
+
         if (!followLive && data.xs.length > 0) {
-            const startTs = data.xs[0];
-            pausedEndTs = startTs + val * 1000;
+            pausedEndTs = globalMin + val * 1000;
         } else {
             pausedEndTs = null;
         }
@@ -1591,41 +1854,6 @@ function initSliders() {
     });
 }
 
-function updateEndSlider() {
-    const endSlider = document.getElementById('end-slider');
-    const endLabel = document.getElementById('end-slider-label');
-
-    if (data.xs.length < 2) return;
-
-    const startTs = data.xs[0];
-    const endTs = data.xs[data.xs.length - 1];
-    const totalSeconds = Math.floor((endTs - startTs) / 1000);
-
-    endSlider.max = totalSeconds;
-
-    if (followLive) {
-        endSlider.value = totalSeconds;
-        endLabel.textContent = 'live';
-    } else if (pausedEndTs) {
-        const seconds = Math.floor((pausedEndTs - startTs) / 1000);
-        endSlider.value = clamp(seconds, 0, totalSeconds);
-
-        const behindSeconds = Math.floor((endTs - pausedEndTs) / 1000);
-
-        if (behindSeconds < 60) {
-            endLabel.textContent = `${behindSeconds}s behind`;
-        } else {
-            const behindMinutes = Math.floor(behindSeconds / 60);
-            const remainingSeconds = behindSeconds % 60;
-            if (remainingSeconds === 0) {
-                endLabel.textContent = `${behindMinutes}m behind`;
-            } else {
-                endLabel.textContent = `${behindMinutes}m ${remainingSeconds}s behind`;
-            }
-        }
-    }
-}
-
 function initWidgetMenu() {
     const btn = document.getElementById('widget-menu-btn');
     const menu = document.getElementById('widget-menu');
@@ -1642,11 +1870,40 @@ function initWidgetMenu() {
     });
 }
 
+function startStream() {
+    const es = new EventSource('/api/stream');
+
+    es.onmessage = (ev) => {
+        try {
+            const p = JSON.parse(ev.data);
+            document.getElementById('latest').textContent = JSON.stringify(p, null, 2);
+
+            if (data.xs.length === 0) {
+                createChartsFromSnapshot(p);
+            }
+
+            pushDataPoint(p);
+            updateStatCards(p);
+
+            if (followLive) {
+                drawAllCharts();
+                if (fullscreenName) drawFullscreenChart();
+            }
+        } catch (e) {
+            console.error('Stream error:', e);
+        }
+    };
+
+    es.onerror = (err) => {
+        console.error('EventSource error:', err);
+    };
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     initWindowButtons();
     initSliders();
     initWidgetMenu();
-    fetchHistory();
+    fetchInitialData();
     startStream();
     setupTimelineDrag();
 });
