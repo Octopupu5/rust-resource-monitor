@@ -79,8 +79,6 @@ impl Aggregator {
             networks.refresh(false);
             disks.refresh(false);
 
-            // Получаем данные о батарее - инициализируем менеджер каждый раз
-            // или сохраняем в локальную переменную внутри цикла
             let battery_metrics = get_battery_metrics();
             let gpu_metrics = get_gpu_metrics();
 
@@ -110,11 +108,11 @@ impl Aggregator {
 
             let la = System::load_average();
 
-            let total_mem_bytes = sys.total_memory().saturating_mul(1024);
-            let used_mem_bytes = sys.used_memory().saturating_mul(1024);
-            let avail_mem_bytes = sys.available_memory().saturating_mul(1024);
-            let swap_total_bytes = sys.total_swap().saturating_mul(1024);
-            let swap_used_bytes = sys.used_swap().saturating_mul(1024);
+            let total_mem_bytes = sys.total_memory();
+            let used_mem_bytes = sys.used_memory();
+            let avail_mem_bytes = sys.available_memory();
+            let swap_total_bytes = sys.total_swap();
+            let swap_used_bytes = sys.used_swap();
 
             let rx_total = sum_network_rx(&networks);
             let tx_total = sum_network_tx(&networks);

@@ -1678,7 +1678,7 @@ async function fetchInitialData() {
 
         const dbStatsRes = await fetch('/api/db/stats');
         let fromTs = 0;
-        let toTs = Date.now() * 1000;
+        let toTs = Date.now();
 
         if (dbStatsRes.ok) {
             const stats = await dbStatsRes.json();

@@ -12,7 +12,7 @@ pub fn render_index() -> String {
 <body>
   <h1>Resource Monitor</h1>
 
-  <!-- Stat cards будут созданы динамически на основе данных -->
+  <!-- Stat cards are created dynamically from snapshot data -->
   <div class="stat-grid" id="stat-cards"></div>
 
   <div class="topbar">
@@ -72,7 +72,7 @@ pub fn render_index() -> String {
     </div>
   </div>
 
-  <!-- Графики будут созданы динамически на основе данных из snapshot -->
+  <!-- Charts are created dynamically from snapshot data -->
   <div id="charts-container" class="widgets-grid"></div>
 
   <h3 style="margin-top:20px;">Latest snapshot</h3>

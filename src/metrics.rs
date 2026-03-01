@@ -349,7 +349,7 @@ pub fn now_timestamp_ms() -> u128 {
     }
 }
 
-fn format_bytes_short(bytes: u64) -> String {
+pub fn format_bytes_short(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;
@@ -363,16 +363,16 @@ fn format_bytes_short(bytes: u64) -> String {
     }
 }
 
-fn get_battery_color(percentage: f32) -> String {
+pub fn get_battery_color(percentage: f32) -> String {
     if percentage >= 90.0 {
-        "#4ade80".to_string() // Зеленый
+        "#4ade80".to_string()
     } else if percentage >= 60.0 {
-        "#22c55e".to_string() // Светло-зеленый
+        "#22c55e".to_string()
     } else if percentage >= 30.0 {
-        "#fbbf24".to_string() // Желтый
+        "#fbbf24".to_string()
     } else if percentage >= 10.0 {
-        "#f97316".to_string() // Оранжевый
+        "#f97316".to_string()
     } else {
-        "#ef4444".to_string() // Красный
+        "#ef4444".to_string()
     }
 }

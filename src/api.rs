@@ -67,14 +67,6 @@ struct HealthResponse {
     status: &'static str,
 }
 
-#[derive(Serialize)]
-struct DbStats {
-    total_records: usize,
-    oldest_timestamp: Option<u64>,
-    newest_timestamp: Option<u64>,
-    database_size_bytes: u64,
-}
-
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(HealthResponse { status: "ok" })).into_response()
 }
@@ -140,27 +132,8 @@ async fn get_history(
 }
 
 async fn db_stats(State(state): State<AppState>) -> impl IntoResponse {
-    match state.db.get_history(None, None) {
-        Ok(all) => {
-            let total_records = all.len();
-            let oldest_timestamp = all.last().map(|s| s.timestamp_ms as u64);
-            let newest_timestamp = all.first().map(|s| s.timestamp_ms as u64);
-
-            let db_size = std::fs::metadata("metrics.db")
-                .map(|m| m.len())
-                .unwrap_or(0);
-
-            (
-                StatusCode::OK,
-                Json(DbStats {
-                    total_records,
-                    oldest_timestamp,
-                    newest_timestamp,
-                    database_size_bytes: db_size,
-                }),
-            )
-                .into_response()
-        }
+    match state.db.get_stats() {
+        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

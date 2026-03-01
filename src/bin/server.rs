@@ -72,7 +72,6 @@ async fn main() {
         args.db_path.display()
     );
 
-    // Инициализируем базу данных
     let db = match MetricsDb::new(&args.db_path) {
         Ok(db) => Arc::new(db),
         Err(e) => {
@@ -81,7 +80,6 @@ async fn main() {
         }
     };
 
-    // Запускаем cleanup если нужно
     if args.db_cleanup_hours > 0 {
         let db_clone = db.clone();
         let cleanup_interval = Duration::from_secs(3600);

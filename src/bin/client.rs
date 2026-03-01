@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use clap::Parser;
+use futures::StreamExt;
 use resource_monitor::console;
 use resource_monitor::metrics::RpcMetricsSnapshot;
 use resource_monitor::runtime;
@@ -202,7 +203,6 @@ async fn proxy_stream(State(st): State<ProxyState>) -> Response {
     match st.http.get(&url).send().await {
         Ok(resp) => {
             let byte_stream = resp.bytes_stream();
-            use futures::StreamExt;
             let body_stream = byte_stream.map(|chunk| chunk.map_err(std::io::Error::other));
             Response::builder()
                 .header("content-type", "text/event-stream")

@@ -1,6 +1,5 @@
 use crate::metrics::{MetricsSnapshot, RpcMetricsSnapshot};
 use crate::storage::MetricsBuffer;
-use nuts;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::warn;
