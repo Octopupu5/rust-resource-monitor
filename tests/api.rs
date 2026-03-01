@@ -56,10 +56,11 @@ async fn health_ok() {
 }
 
 #[tokio::test]
-async fn history_filters_by_since_ms() {
+async fn range_filters_by_timestamps() {
     let buffer = Arc::new(MetricsBuffer::new(10));
     buffer.push(sample_snapshot(1000));
     buffer.push(sample_snapshot(2000));
+    buffer.push(sample_snapshot(3000));
 
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
     let app = router(AppState {
@@ -70,7 +71,7 @@ async fn history_filters_by_since_ms() {
     let response = app
         .oneshot(
             axum::http::Request::builder()
-                .uri("/api/history?since_ms=1500")
+                .uri("/api/range?from_ts=1500&to_ts=2500")
                 .body(axum::body::Body::empty())
                 .unwrap(),
         )
@@ -84,6 +85,35 @@ async fn history_filters_by_since_ms() {
     let arr = json.as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["timestamp_ms"].as_u64().unwrap(), 2000);
+}
+
+#[tokio::test]
+async fn latest_returns_last_snapshot() {
+    let buffer = Arc::new(MetricsBuffer::new(10));
+    buffer.push(sample_snapshot(1000));
+    buffer.push(sample_snapshot(2000));
+
+    let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
+    let app = router(AppState {
+        buffer,
+        stream_tx,
+        shutdown: CancellationToken::new(),
+    });
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/latest")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["timestamp_ms"].as_u64().unwrap(), 2000);
 }
 
 #[tokio::test]

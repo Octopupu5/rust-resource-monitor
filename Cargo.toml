@@ -21,6 +21,7 @@ tarpc = { version = "0.34", features = ["tokio1", "serde-transport", "tcp"] }
 tokio-serde = { version = "0.8", features = ["json"] }
 futures = "0.3"
 battery = "0.7.8"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

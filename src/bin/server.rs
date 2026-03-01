@@ -1,6 +1,6 @@
 use clap::Parser;
 use resource_monitor::aggregator::{Aggregator, AggregatorConfig};
-use resource_monitor::api::{router, AppState};
+use resource_monitor::api::{api_only_router, AppState};
 use resource_monitor::console;
 use resource_monitor::metrics::{MetricsSnapshot, RpcMetricsSnapshot};
 use resource_monitor::runtime;
@@ -33,13 +33,13 @@ struct Args {
     #[arg(long, default_value = "0.0.0.0")]
     bind: IpAddr,
 
-    /// HTTP server port
-    #[arg(long, default_value_t = 8080)]
+    /// HTTP API server port
+    #[arg(long, default_value_t = 9000)]
     port: u16,
 
-    /// Disable HTTP server
+    /// Disable HTTP API server
     #[arg(long, default_value_t = false)]
-    no_web: bool,
+    no_http: bool,
 
     /// Also show console output
     #[arg(long, default_value_t = false)]
@@ -51,13 +51,13 @@ async fn main() {
     runtime::init_tracing();
     let args = Args::parse();
     info!(
-        "Starting server: interval={}ms, history={}, rpc={}, http={}:{}, web={}, console={}",
+        "Starting server: interval={}ms, history={}, rpc={}, http={}:{}, http_enabled={}, console={}",
         args.interval_ms,
         args.history,
         args.rpc_addr,
         args.bind,
         args.port,
-        !args.no_web,
+        !args.no_http,
         args.console
     );
 
@@ -107,14 +107,14 @@ async fn main() {
         .await;
     });
 
-    // HTTP server
-    let web_handle = if !args.no_web {
+    // HTTP API server (no web page — the client serves it)
+    let web_handle = if !args.no_http {
         let state = AppState {
             buffer: buffer.clone(),
             stream_tx: rpc_stream_tx.clone(),
             shutdown: cancel.clone(),
         };
-        let app = router(state);
+        let app = api_only_router(state);
         let addr = SocketAddr::from((args.bind, args.port));
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
@@ -125,7 +125,7 @@ async fn main() {
             }
         };
         info!(
-            "HTTP server listening on http://{}",
+            "HTTP API listening on http://{}",
             listener.local_addr().unwrap_or(addr)
         );
         let shutdown = cancel.clone();
@@ -162,7 +162,7 @@ async fn main() {
 
     if let Some(h) = web_handle {
         if tokio::time::timeout(shutdown_timeout, h).await.is_err() {
-            info!("HTTP server shutdown timeout");
+            info!("HTTP API shutdown timeout");
         }
     }
     if tokio::time::timeout(shutdown_timeout, rpc_handle)

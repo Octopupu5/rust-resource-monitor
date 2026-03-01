@@ -26,17 +26,34 @@ pub struct AppState {
 #[derive(Deserialize)]
 pub struct HistoryQuery {
     pub limit: Option<usize>,
-    pub since_ms: Option<u64>,
-    pub until_ms: Option<u64>,
 }
 
+#[derive(Deserialize)]
+pub struct RangeQuery {
+    pub from_ts: u64,
+    pub to_ts: u64,
+}
+
+fn api_routes() -> Router<AppState> {
+    Router::new()
+        .route("/api/health", get(health))
+        .route("/api/latest", get(get_latest))
+        .route("/api/metrics", get(get_latest))
+        .route("/api/range", get(get_range))
+        .route("/api/history", get(get_history))
+        .route("/api/stream", get(stream))
+}
+
+/// API-only router: no web page (used by server)
+pub fn api_only_router(state: AppState) -> Router {
+    api_routes().with_state(state)
+}
+
+/// Full router: API endpoints + web page (used by client)
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/api/health", get(health))
-        .route("/api/metrics", get(get_latest))
-        .route("/api/history", get(get_history))
-        .route("/api/stream", get(stream))
+        .merge(api_routes())
         .with_state(state)
 }
 
@@ -66,37 +83,39 @@ async fn get_latest(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+async fn get_range(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<RangeQuery>,
+) -> impl IntoResponse {
+    let from = query.from_ts as u128;
+    let to = query.to_ts as u128;
+
+    let snapshots: Vec<RpcMetricsSnapshot> = state
+        .buffer
+        .history(None)
+        .into_iter()
+        .filter(|s| s.timestamp_ms >= from && s.timestamp_ms <= to)
+        .map(|s| s.to_rpc_format())
+        .collect();
+
+    (StatusCode::OK, Json(snapshots)).into_response()
+}
+
 async fn get_history(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    let limit = query.limit;
-    let since_ms = query.since_ms;
-    let until_ms = query.until_ms;
+    let all = state.buffer.history(None);
 
-    let history: Vec<RpcMetricsSnapshot> = state
-        .buffer
-        .history(None)
-        .into_iter()
-        .filter(|s| {
-            since_ms
-                .map(|ts| s.timestamp_ms >= ts as u128)
-                .unwrap_or(true)
-        })
-        .filter(|s| {
-            until_ms
-                .map(|ts| s.timestamp_ms <= ts as u128)
-                .unwrap_or(true)
-        })
-        .map(|s| s.to_rpc_format())
-        .collect();
-
-    let history = if let Some(limit) = limit {
-        let len = history.len();
+    let history: Vec<RpcMetricsSnapshot> = if let Some(limit) = query.limit {
+        let len = all.len();
         let take = limit.min(len);
-        history.into_iter().skip(len - take).collect()
+        all.into_iter()
+            .skip(len - take)
+            .map(|s| s.to_rpc_format())
+            .collect()
     } else {
-        history
+        all.into_iter().map(|s| s.to_rpc_format()).collect()
     };
 
     (StatusCode::OK, Json(history)).into_response()

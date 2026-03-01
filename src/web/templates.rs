@@ -27,9 +27,11 @@ pub fn render_index() -> String {
     </div>
     <div class="controls">
       <span class="label">Links</span>
-      <a href="/api/metrics">/api/metrics</a>
+      <a href="/api/latest">/api/latest</a>
       <span class="label">|</span>
       <a href="/api/history?limit=60">/api/history</a>
+      <span class="label">|</span>
+      <a href="/api/range?from_ts=0&to_ts=9999999999999">/api/range</a>
       <span class="label">|</span>
       <a href="/api/health">/api/health</a>
       <span class="label">|</span>
