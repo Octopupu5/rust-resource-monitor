@@ -184,11 +184,8 @@ impl MetricsDb {
     pub fn get_stats(&self) -> Result<DbStats, rusqlite::Error> {
         let conn = self.conn.lock().unwrap();
 
-        let total_records: usize = conn.query_row(
-            "SELECT COUNT(*) FROM metrics",
-            [],
-            |row| row.get(0),
-        )?;
+        let total_records: usize =
+            conn.query_row("SELECT COUNT(*) FROM metrics", [], |row| row.get(0))?;
 
         let oldest_timestamp: Option<u64> = conn
             .query_row("SELECT MIN(timestamp_ms) FROM metrics", [], |row| {
@@ -202,9 +199,7 @@ impl MetricsDb {
             })?
             .map(|v| v as u64);
 
-        let database_size_bytes = std::fs::metadata(&self.path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let database_size_bytes = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
 
         Ok(DbStats {
             total_records,
