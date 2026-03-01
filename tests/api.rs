@@ -1,21 +1,29 @@
 use resource_monitor::api::{router, AppState};
+use resource_monitor::db::MetricsDb;
 use resource_monitor::metrics::{
-    CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics,
+    CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics, RpcMetricsSnapshot,
 };
 use resource_monitor::storage::MetricsBuffer;
 use std::sync::Arc;
+use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 use tower::util::ServiceExt;
 
 #[tokio::test]
 async fn history_initially_empty() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Arc::new(MetricsDb::new(&db_path).unwrap());
+
     let buffer = Arc::new(MetricsBuffer::new(10));
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
     let app = router(AppState {
         buffer,
+        db,
         stream_tx,
         shutdown: CancellationToken::new(),
     });
+
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -36,13 +44,19 @@ async fn history_initially_empty() {
 
 #[tokio::test]
 async fn health_ok() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Arc::new(MetricsDb::new(&db_path).unwrap());
+
     let buffer = Arc::new(MetricsBuffer::new(10));
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
     let app = router(AppState {
         buffer,
+        db,
         stream_tx,
         shutdown: CancellationToken::new(),
     });
+
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -57,17 +71,23 @@ async fn health_ok() {
 
 #[tokio::test]
 async fn range_filters_by_timestamps() {
-    let buffer = Arc::new(MetricsBuffer::new(10));
-    buffer.push(sample_snapshot(1000));
-    buffer.push(sample_snapshot(2000));
-    buffer.push(sample_snapshot(3000));
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Arc::new(MetricsDb::new(&db_path).unwrap());
 
+    db.insert(&sample_snapshot(1000)).unwrap();
+    db.insert(&sample_snapshot(2000)).unwrap();
+    db.insert(&sample_snapshot(3000)).unwrap();
+
+    let buffer = Arc::new(MetricsBuffer::new(10));
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
     let app = router(AppState {
         buffer,
+        db,
         stream_tx,
         shutdown: CancellationToken::new(),
     });
+
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -89,16 +109,22 @@ async fn range_filters_by_timestamps() {
 
 #[tokio::test]
 async fn latest_returns_last_snapshot() {
-    let buffer = Arc::new(MetricsBuffer::new(10));
-    buffer.push(sample_snapshot(1000));
-    buffer.push(sample_snapshot(2000));
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Arc::new(MetricsDb::new(&db_path).unwrap());
 
+    db.insert(&sample_snapshot(1000)).unwrap();
+    db.insert(&sample_snapshot(2000)).unwrap();
+
+    let buffer = Arc::new(MetricsBuffer::new(10));
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
     let app = router(AppState {
         buffer,
+        db,
         stream_tx,
         shutdown: CancellationToken::new(),
     });
+
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -118,13 +144,19 @@ async fn latest_returns_last_snapshot() {
 
 #[tokio::test]
 async fn stream_is_event_stream() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Arc::new(MetricsDb::new(&db_path).unwrap());
+
     let buffer = Arc::new(MetricsBuffer::new(10));
     let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
     let app = router(AppState {
         buffer,
+        db,
         stream_tx,
         shutdown: CancellationToken::new(),
     });
+
     let response = app
         .oneshot(
             axum::http::Request::builder()
@@ -141,6 +173,86 @@ async fn stream_is_event_stream() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     assert!(ct.starts_with("text/event-stream"));
+}
+
+#[tokio::test]
+async fn range_with_limit() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Arc::new(MetricsDb::new(&db_path).unwrap());
+
+    db.insert(&sample_snapshot(1000)).unwrap();
+    db.insert(&sample_snapshot(2000)).unwrap();
+    db.insert(&sample_snapshot(3000)).unwrap();
+    db.insert(&sample_snapshot(4000)).unwrap();
+
+    let buffer = Arc::new(MetricsBuffer::new(10));
+    let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
+    let app = router(AppState {
+        buffer,
+        db,
+        stream_tx,
+        shutdown: CancellationToken::new(),
+    });
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/range?from_ts=1000&to_ts=4000&limit=2")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let arr = json.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+    assert_eq!(arr[0]["timestamp_ms"].as_u64().unwrap(), 4000);
+    assert_eq!(arr[1]["timestamp_ms"].as_u64().unwrap(), 3000);
+}
+
+#[tokio::test]
+async fn history_with_since() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let db = Arc::new(MetricsDb::new(&db_path).unwrap());
+
+    db.insert(&sample_snapshot(1000)).unwrap();
+    db.insert(&sample_snapshot(2000)).unwrap();
+    db.insert(&sample_snapshot(3000)).unwrap();
+
+    let buffer = Arc::new(MetricsBuffer::new(10));
+    let (stream_tx, _stream_rx) = tokio::sync::broadcast::channel(8);
+    let app = router(AppState {
+        buffer,
+        db,
+        stream_tx,
+        shutdown: CancellationToken::new(),
+    });
+
+    let response = app
+        .oneshot(
+            axum::http::Request::builder()
+                .uri("/api/history?since_ts=2000&limit=2")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let arr = json.as_array().unwrap();
+    assert_eq!(arr.len(), 2);
+
+    assert_eq!(arr[0]["timestamp_ms"].as_u64().unwrap(), 3000);
+    assert_eq!(arr[1]["timestamp_ms"].as_u64().unwrap(), 2000);
 }
 
 fn sample_snapshot(ts: u128) -> MetricsSnapshot {

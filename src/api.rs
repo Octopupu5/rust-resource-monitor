@@ -1,3 +1,4 @@
+use crate::db::MetricsDb;
 use crate::metrics::{ErrorResponse, RpcMetricsSnapshot};
 use crate::storage::MetricsBuffer;
 use crate::web;
@@ -19,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone)]
 pub struct AppState {
     pub buffer: Arc<MetricsBuffer>,
+    pub db: Arc<MetricsDb>,
     pub stream_tx: broadcast::Sender<RpcMetricsSnapshot>,
     pub shutdown: CancellationToken,
 }
@@ -26,12 +28,14 @@ pub struct AppState {
 #[derive(Deserialize)]
 pub struct HistoryQuery {
     pub limit: Option<usize>,
+    pub since_ts: Option<u64>,
 }
 
 #[derive(Deserialize)]
 pub struct RangeQuery {
     pub from_ts: u64,
     pub to_ts: u64,
+    pub limit: Option<usize>,
 }
 
 fn api_routes() -> Router<AppState> {
@@ -42,6 +46,7 @@ fn api_routes() -> Router<AppState> {
         .route("/api/range", get(get_range))
         .route("/api/history", get(get_history))
         .route("/api/stream", get(stream))
+        .route("/api/db/stats", get(db_stats))
 }
 
 /// API-only router: no web page (used by server)
@@ -62,6 +67,14 @@ struct HealthResponse {
     status: &'static str,
 }
 
+#[derive(Serialize)]
+struct DbStats {
+    total_records: usize,
+    oldest_timestamp: Option<u64>,
+    newest_timestamp: Option<u64>,
+    database_size_bytes: u64,
+}
+
 async fn health() -> impl IntoResponse {
     (StatusCode::OK, Json(HealthResponse { status: "ok" })).into_response()
 }
@@ -71,12 +84,23 @@ async fn index() -> impl IntoResponse {
 }
 
 async fn get_latest(State(state): State<AppState>) -> impl IntoResponse {
-    match state.buffer.latest() {
-        Some(snap) => (StatusCode::OK, Json(snap.to_rpc_format())).into_response(),
-        None => (
+    if let Some(snap) = state.buffer.latest() {
+        return (StatusCode::OK, Json(snap.to_rpc_format())).into_response();
+    }
+
+    match state.db.get_latest() {
+        Ok(Some(snap)) => (StatusCode::OK, Json(snap)).into_response(),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: "no data yet".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("database error: {}", e),
             }),
         )
             .into_response(),
@@ -87,38 +111,64 @@ async fn get_range(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<RangeQuery>,
 ) -> impl IntoResponse {
-    let from = query.from_ts as u128;
-    let to = query.to_ts as u128;
-
-    let snapshots: Vec<RpcMetricsSnapshot> = state
-        .buffer
-        .history(None)
-        .into_iter()
-        .filter(|s| s.timestamp_ms >= from && s.timestamp_ms <= to)
-        .map(|s| s.to_rpc_format())
-        .collect();
-
-    (StatusCode::OK, Json(snapshots)).into_response()
+    match state.db.get_range(query.from_ts, query.to_ts, query.limit) {
+        Ok(snapshots) => (StatusCode::OK, Json(snapshots)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("database error: {}", e),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn get_history(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    let all = state.buffer.history(None);
+    match state.db.get_history(query.limit, query.since_ts) {
+        Ok(history) => (StatusCode::OK, Json(history)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("database error: {}", e),
+            }),
+        )
+            .into_response(),
+    }
+}
 
-    let history: Vec<RpcMetricsSnapshot> = if let Some(limit) = query.limit {
-        let len = all.len();
-        let take = limit.min(len);
-        all.into_iter()
-            .skip(len - take)
-            .map(|s| s.to_rpc_format())
-            .collect()
-    } else {
-        all.into_iter().map(|s| s.to_rpc_format()).collect()
-    };
+async fn db_stats(State(state): State<AppState>) -> impl IntoResponse {
+    match state.db.get_history(None, None) {
+        Ok(all) => {
+            let total_records = all.len();
+            let oldest_timestamp = all.last().map(|s| s.timestamp_ms as u64);
+            let newest_timestamp = all.first().map(|s| s.timestamp_ms as u64);
 
-    (StatusCode::OK, Json(history)).into_response()
+            let db_size = std::fs::metadata("metrics.db")
+                .map(|m| m.len())
+                .unwrap_or(0);
+
+            (
+                StatusCode::OK,
+                Json(DbStats {
+                    total_records,
+                    oldest_timestamp,
+                    newest_timestamp,
+                    database_size_bytes: db_size,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: format!("database error: {}", e),
+            }),
+        )
+            .into_response(),
+    }
 }
 
 async fn stream(

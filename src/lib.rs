@@ -3,6 +3,7 @@ pub mod api;
 pub mod bus;
 pub mod config;
 pub mod console;
+pub mod db;
 pub mod metrics;
 pub mod rpc;
 pub mod runtime;
