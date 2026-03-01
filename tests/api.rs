@@ -1,7 +1,7 @@
 use resource_monitor::api::{router, AppState};
 use resource_monitor::db::MetricsDb;
 use resource_monitor::metrics::{
-    CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics, RpcMetricsSnapshot,
+    CpuMetrics, DiskMetrics, MemoryMetrics, MetricsSnapshot, NetworkMetrics,
 };
 use resource_monitor::storage::MetricsBuffer;
 use std::sync::Arc;
