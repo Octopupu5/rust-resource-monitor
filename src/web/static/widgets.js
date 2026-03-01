@@ -6,6 +6,7 @@ let windowStartMs = null;
 const tooltip = document.getElementById('tooltip');
 let lastView = null;
 let hiddenSeries = {};
+const GAP_THRESHOLD_MS = 5000;
 
 let widgetOrder = JSON.parse(localStorage.getItem('rm_widgetOrder') || '[]');
 let hiddenWidgets = JSON.parse(localStorage.getItem('rm_hiddenWidgets') || '{}');
@@ -391,50 +392,50 @@ function drawFullscreenChart() {
                 } else {
 
                     const lastTs = currentSegment.xs[currentSegment.xs.length - 1];
-                    if (ts - lastTs < 5000) {
-                        currentSegment.xs.push(ts);
-                        currentSegment.ys.push(value);
-                    } else {
+                        if (ts - lastTs < GAP_THRESHOLD_MS) {
+                            currentSegment.xs.push(ts);
+                            currentSegment.ys.push(value);
+                        } else {
+
+                            if (currentSegment.xs.length > 1) {
+                                segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
+                            }
+                            currentSegment = { xs: [ts], ys: [value], valid: true };
+                        }
+                    }
+                } else {
+                    if (currentSegment.valid) {
 
                         if (currentSegment.xs.length > 1) {
                             segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
                         }
-                        currentSegment = { xs: [ts], ys: [value], valid: true };
+                        currentSegment = { xs: [], ys: [], valid: false };
                     }
                 }
-            } else {
-                if (currentSegment.valid) {
+            }
 
-                    if (currentSegment.xs.length > 1) {
-                        segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
-                    }
-                    currentSegment = { xs: [], ys: [], valid: false };
+            if (currentSegment.valid && currentSegment.xs.length > 1) {
+                segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
+            }
+
+            if (!hasAnyData) continue;
+
+            let color = '#888';
+            for (let i = view.endIdx - 1; i >= view.startIdx; i--) {
+                const legends = seriesData.legends[i] || [];
+                if (legends[lineIdx]) {
+                    color = legends[lineIdx].color;
+                    break;
                 }
             }
-        }
 
-        if (currentSegment.valid && currentSegment.xs.length > 1) {
-            segments.push({ xs: [...currentSegment.xs], ys: [...currentSegment.ys] });
-        }
-
-        if (!hasAnyData) continue;
-
-        let color = '#888';
-        for (let i = view.endIdx - 1; i >= view.startIdx; i--) {
-            const legends = seriesData.legends[i] || [];
-            if (legends[lineIdx]) {
-                color = legends[lineIdx].color;
-                break;
-            }
-        }
-
-        segments.forEach(segment => {
-            seriesList.push({
-                ys: segment.ys,
-                xs: segment.xs,
-                color: color,
-                lineWidth: maxLines > 8 ? 1.5 : 2.5,
-                lineIdx: lineIdx
+            segments.forEach(segment => {
+                seriesList.push({
+                    ys: segment.ys,
+                    xs: segment.xs,
+                    color: color,
+                    lineWidth: maxLines > 8 ? 1.5 : 2.5,
+                    lineIdx: lineIdx
             });
         });
     }
@@ -738,7 +739,7 @@ function drawAllCharts() {
                     } else {
 
                         const lastTs = currentSegment.xs[currentSegment.xs.length - 1];
-                        if (ts - lastTs < 5000) {
+                        if (ts - lastTs < GAP_THRESHOLD_MS) {
                             currentSegment.xs.push(ts);
                             currentSegment.ys.push(value);
                         } else {
@@ -1040,12 +1041,14 @@ function drawTimeline() {
         ctx.lineWidth = 1;
 
         let inSegment = false;
+        let lastValidTs = null;
+        const chartTop = 14;
+        const chartBot = h - timeLabelArea - 4;
 
         for (let i = 0; i < data.xs.length; i++) {
             const value = data.series['cpu_total'].values[i]?.[0];
-            const x = pad + ((data.xs[i] - globalMin) / (globalMax - globalMin)) * (w - 2 * pad);
-            const chartTop = 14;
-            const chartBot = h - timeLabelArea - 4;
+            const ts = data.xs[i];
+            const x = pad + ((ts - globalMin) / (globalMax - globalMin)) * (w - 2 * pad);
 
             if (value !== undefined && value !== null && !isNaN(value)) {
                 const y = chartTop + (1 - value / 100) * (chartBot - chartTop);
@@ -1054,9 +1057,14 @@ function drawTimeline() {
                     ctx.beginPath();
                     ctx.moveTo(x, y);
                     inSegment = true;
+                } else if (lastValidTs !== null && ts - lastValidTs >= GAP_THRESHOLD_MS) {
+                    ctx.stroke();
+                    ctx.beginPath();
+                    ctx.moveTo(x, y);
                 } else {
                     ctx.lineTo(x, y);
                 }
+                lastValidTs = ts;
             } else {
                 if (inSegment) {
                     ctx.stroke();
@@ -1152,12 +1160,24 @@ function drawTimeline() {
         if (clampedX1 > clampedX0 + 20) {
             ctx.font = 'bold 12px ui-monospace, monospace';
             ctx.fillStyle = '#e0f2fe';
+
+            const leftLabel = fmtTime(windowStartMs);
+            const rightLabel = fmtTime(windowStartMs + windowMs);
+            const leftW = ctx.measureText(leftLabel).width;
+            const rightW = ctx.measureText(rightLabel).width;
+            const labelGap = 8;
+            const leftEnd = clampedX0 + 4 + leftW;
+            const rightStart = clampedX1 - 4 - rightW;
+            const overlaps = leftEnd + labelGap > rightStart;
+
             ctx.textBaseline = 'middle';
+            const topY = chartMidY - (overlaps ? 8 : 0);
+            const bottomY = chartMidY + (overlaps ? 8 : 0);
 
             ctx.textAlign = 'left';
-            ctx.fillText(fmtTime(windowStartMs), clampedX0 + 4, chartMidY);
+            ctx.fillText(leftLabel, clampedX0 + 4, topY);
             ctx.textAlign = 'right';
-            ctx.fillText(fmtTime(windowStartMs + windowMs), clampedX1 - 4, chartMidY);
+            ctx.fillText(rightLabel, clampedX1 - 4, bottomY);
         }
     }
 
@@ -1170,12 +1190,24 @@ function drawTimeline() {
 
         ctx.font = 'bold 12px ui-monospace, monospace';
         ctx.fillStyle = '#fce7f3';
+
+        const leftLabel = fmtTime(timeStart);
+        const rightLabel = fmtTime(timeEnd);
+        const leftW = ctx.measureText(leftLabel).width;
+        const rightW = ctx.measureText(rightLabel).width;
+        const labelGap = 8;
+        const leftEnd = xStart + 4 + leftW;
+        const rightStart = xEnd - 4 - rightW;
+        const overlaps = leftEnd + labelGap > rightStart;
+
         ctx.textBaseline = 'middle';
+        const topY = chartMidY - (overlaps ? 8 : 0);
+        const bottomY = chartMidY + (overlaps ? 8 : 0);
 
         ctx.textAlign = 'left';
-        ctx.fillText(fmtTime(timeStart), xStart + 4, chartMidY);
+        ctx.fillText(leftLabel, xStart + 4, topY);
         ctx.textAlign = 'right';
-        ctx.fillText(fmtTime(timeEnd), xEnd - 4, chartMidY);
+        ctx.fillText(rightLabel, xEnd - 4, bottomY);
     }
 
 }
