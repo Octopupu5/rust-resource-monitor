@@ -78,7 +78,7 @@ pub fn render_index() -> String {
   <h3 style="margin-top:20px;">Latest snapshot</h3>
   <pre id="latest">Loading...</pre>
   <div id="tooltip"></div>
-  
+
   <script>
     {}
   </script>

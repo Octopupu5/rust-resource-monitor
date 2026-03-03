@@ -192,7 +192,7 @@ function createChartsFromSnapshot(snapshot) {
         if (series.legend && series.legend.length > 0) {
             const legend = document.createElement('div');
             legend.style.cssText = 'font-family: ui-monospace, monospace; font-size: 12px; margin-top: 6px; cursor: pointer;';
-            legend.innerHTML = series.legend.map((l, idx) => 
+            legend.innerHTML = series.legend.map((l, idx) =>
                 `<span data-series="${series.name}" data-index="${idx}" style="color:${l.color}; opacity: ${hiddenSeries[series.name]?.[idx] ? 0.3 : 1};">${l.name}</span>`
             ).join(' ');
 
@@ -456,14 +456,14 @@ function drawFullscreenChart() {
     }
 
     drawLineChart(canvas, seriesList, {
-        xs: view.xs, 
-        minY, 
+        xs: view.xs,
+        minY,
         maxY,
         byteY: seriesData.format?.type === 'Bytes',
-        seriesName: name, 
-        seriesData, 
+        seriesName: name,
+        seriesData,
         startIdx: view.startIdx,
-        warn: seriesData.warn, 
+        warn: seriesData.warn,
         crit: seriesData.crit
     });
 
@@ -512,15 +512,15 @@ function setupFullscreenTooltip() {
 
             const px = meta.leftPad + (view.xs[i] - meta.minX) * xScale;
             const dist = Math.abs(px - mx);
-            if (dist < nearestDist) { 
-                nearestDist = dist; 
-                nearestIdx = i; 
+            if (dist < nearestDist) {
+                nearestDist = dist;
+                nearestIdx = i;
             }
         }
 
-        if (nearestIdx === -1 || nearestDist > 40) { 
-            tooltip.style.display = 'none'; 
-            return; 
+        if (nearestIdx === -1 || nearestDist > 40) {
+            tooltip.style.display = 'none';
+            return;
         }
 
         const nearestXPos = meta.leftPad + (view.xs[nearestIdx] - meta.minX) * xScale;
@@ -937,16 +937,16 @@ function drawLineChart(canvas, seriesSegments, options) {
         ctx.setLineDash([]);
     }
 
-    canvas.__meta = { 
-        minX, 
-        maxX, 
-        minY, 
-        maxY, 
-        w, 
-        h, 
-        leftPad, 
-        rightPad, 
-        topPad, 
+    canvas.__meta = {
+        minX,
+        maxX,
+        minY,
+        maxY,
+        w,
+        h,
+        leftPad,
+        rightPad,
+        topPad,
         bottomPad,
         seriesName: options.seriesName,
         seriesData: options.seriesData,
@@ -1323,7 +1323,7 @@ function setupChartHandlers() {
                 if (v === undefined || v === null || isNaN(v)) continue;
 
                 const valueRatio = (v - meta.minY) / (meta.maxY - meta.minY);
-                const yPos = meta.topPad + (meta.h - meta.topPad - meta.bottomPad) - 
+                const yPos = meta.topPad + (meta.h - meta.topPad - meta.bottomPad) -
                             valueRatio * (meta.h - meta.topPad - meta.bottomPad);
 
                 ctx.fillStyle = legend.color;
