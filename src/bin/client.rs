@@ -1,7 +1,6 @@
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
@@ -11,14 +10,11 @@ use resource_monitor::console;
 use resource_monitor::metrics::RpcMetricsSnapshot;
 use resource_monitor::runtime;
 use resource_monitor::web;
-use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::sync::broadcast;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -51,8 +47,6 @@ struct Args {
 struct ProxyState {
     api_url: String,
     http: reqwest::Client,
-    rpc_latest: Arc<RwLock<Option<RpcMetricsSnapshot>>>,
-    rpc_stream_tx: broadcast::Sender<RpcMetricsSnapshot>,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -65,31 +59,10 @@ async fn main() {
     );
 
     let cancel = CancellationToken::new();
-    let rpc_latest: Arc<RwLock<Option<RpcMetricsSnapshot>>> = Arc::new(RwLock::new(None));
-    let (rpc_stream_tx, _) = broadcast::channel::<RpcMetricsSnapshot>(256);
-
-    let rpc_cancel = cancel.clone();
-    let rpc_addr = args.rpc_addr;
-    let rpc_latest_for_stream = rpc_latest.clone();
-    let rpc_stream_tx_for_stream = rpc_stream_tx.clone();
-    let rpc_handle = tokio::spawn(async move {
-        resource_monitor::rpc::run_rpc_client_streamer(rpc_addr, rpc_cancel, move |snap| {
-            let mut guard = rpc_latest_for_stream
-                .write()
-                .unwrap_or_else(|p| p.into_inner());
-            *guard = Some(snap.clone());
-            if let Err(e) = rpc_stream_tx_for_stream.send(snap) {
-                warn!("Failed to forward RPC snapshot to web stream: {}", e);
-            }
-        })
-        .await;
-    });
 
     let proxy_state = ProxyState {
         api_url: args.api_url.trim_end_matches('/').to_string(),
         http: reqwest::Client::new(),
-        rpc_latest: rpc_latest.clone(),
-        rpc_stream_tx: rpc_stream_tx.clone(),
     };
 
     let app = Router::new()
@@ -127,8 +100,18 @@ async fn main() {
 
     // Console via RPC (optional)
     let console_handle = if args.console {
+        let latest: Arc<RwLock<Option<RpcMetricsSnapshot>>> = Arc::new(RwLock::new(None));
+        let rpc_cancel = cancel.clone();
+        let rpc_addr = args.rpc_addr;
+        let rpc_latest = latest.clone();
+        tokio::spawn(async move {
+            resource_monitor::rpc::run_rpc_client_streamer(rpc_addr, rpc_cancel, move |snap| {
+                let mut guard = rpc_latest.write().unwrap_or_else(|p| p.into_inner());
+                *guard = Some(snap);
+            })
+            .await;
+        });
         let console_cancel = cancel.clone();
-        let latest = rpc_latest.clone();
         Some(tokio::spawn(async move {
             console::run_rpc_console(latest, Duration::from_millis(1000), console_cancel).await;
         }))
@@ -153,12 +136,6 @@ async fn main() {
             info!("Console shutdown timeout");
         }
     }
-    if tokio::time::timeout(shutdown_timeout, rpc_handle)
-        .await
-        .is_err()
-    {
-        info!("RPC stream shutdown timeout");
-    }
 
     info!("Client stopped");
 }
@@ -175,15 +152,6 @@ async fn proxy_latest(
     State(st): State<ProxyState>,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
 ) -> Response {
-    let latest = st
-        .rpc_latest
-        .read()
-        .unwrap_or_else(|p| p.into_inner())
-        .clone();
-    if let Some(snapshot) = latest {
-        return (StatusCode::OK, axum::Json(snapshot)).into_response();
-    }
-
     let qs = query.map(|q| format!("?{}", q)).unwrap_or_default();
     proxy_get(&st, "/api/latest", &qs).await
 }
@@ -230,25 +198,20 @@ async fn proxy_get(st: &ProxyState, path: &str, query: &str) -> Response {
     }
 }
 
-async fn proxy_stream(
-    State(st): State<ProxyState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let rx = st.rpc_stream_tx.subscribe();
-    let stream = BroadcastStream::new(rx).map(|msg| match msg {
-        Ok(snapshot) => match serde_json::to_string(&snapshot) {
-            Ok(json) => Ok(Event::default().data(json)),
-            Err(e) => Ok(Event::default()
-                .event("error")
-                .data(format!("serialize_error: {e}"))),
-        },
-        Err(e) => Ok(Event::default()
-            .event("error")
-            .data(format!("stream_error: {e}"))),
-    });
-
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(10))
-            .text("keep-alive"),
-    )
+async fn proxy_stream(State(st): State<ProxyState>) -> Response {
+    let url = format!("{}/api/stream", st.api_url);
+    match st.http.get(&url).send().await {
+        Ok(resp) => {
+            let byte_stream = resp.bytes_stream();
+            let body_stream = byte_stream.map(|chunk| chunk.map_err(std::io::Error::other));
+            Response::builder()
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .body(Body::from_stream(body_stream))
+                .unwrap_or_else(|_| {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "stream build error").into_response()
+                })
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("proxy error: {e}")).into_response(),
+    }
 }
