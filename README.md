@@ -1,6 +1,6 @@
-Resource Monitor
+# Resource Monitor
 
-A small system monitor written in Rust.
+### A small system monitor written in Rust.
 
 What it does:
 - Collects CPU, memory, disk, network, GPU, battery metrics
@@ -18,10 +18,13 @@ How it is built:
 
 Run:
 1) Start server
+   ```
    cargo run --bin server -- --rpc-addr 127.0.0.1:50051 --bind 127.0.0.1 --port 9000
+   ```
 
 2) Start client
+   ```
    cargo run --bin client -- --api-url http://127.0.0.1:9000 --rpc-addr 127.0.0.1:50051 --bind 127.0.0.1 --port 8080
-
-3) Open
-   http://127.0.0.1:8080
+   ```
+   
+3) Open ``http://127.0.0.1:8080``
